@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THE BLOOM — Pixel Purge</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui">
+        <div id="topBar">
+            <div id="livesBox">HULL <span id="lives">20</span></div>
+            <div id="waveBox">THREAT <span id="threatLevel">1</span></div>
+            <div id="heartsBox" title="Slay all mycelium hearts to liberate the system">♥ <span id="heartsLeft">3</span></div>
+            <div id="systemBox">SYSTEM <span id="systemNumber">1</span></div>
+            <div id="laneBox">LANES <span id="laneCount">0</span>/<span id="nodeCount">0</span></div>
+            <div id="droneBox">DRONES <span id="droneCount">0/1</span></div>
+            <div id="coinsBox"><span class="coin"></span> GOLD <span id="coins">130</span></div>
+            <div id="nextWaveWrap">
+                <span id="waveTimer">NEXT CONTACT 8.0s</span>
+                <button id="warpBtn" class="ghost small hidden" title="Warp to next system - keep empire, new worlds">WARP ✦</button>
+            </div>
+            <button id="speedBtn" class="ghost small">×1</button>
+            <button id="pauseBtn" class="ghost small">⏸</button>
+        </div>
+
+        <div id="buildBar">
+            <div id="barTopRow">
+                <div class="build-title">BUILD</div>
+                <button id="barToggle" class="ghost small" title="Hide build bar (B)">–</button>
+            </div>
+            <div id="buildButtons"></div>
+        </div>
+
+        <div id="towerPanel" class="hidden">
+            <div id="towerPanelHead">
+                <span id="towerPanelIcon">◉</span>
+                <b id="towerPanelName">Pulse Laser</b>
+                <span id="towerPanelLevel">MK·I</span>
+                <button id="closePanel">✕</button>
+            </div>
+            <div id="towerStats"></div>
+            <div id="towerActions">
+                <button id="upgradeBtn">UPGRADE — <span id="upgradeCost">45</span> <span class="coin sm"></span></button>
+                <button id="sellBtn" class="ghost">SELL +<span id="sellValue">22</span>g</button>
+            </div>
+            <div id="towerRangeHint">Gold corners = range • <span style="opacity:0.6">Ctrl+Z undo</span></div>
+        </div>
+        <div id="wavePreview">▓ <span id="wavePreviewText">-</span></div>
+        <div id="statsOverlay">DPS <b id="statDps">0</b> • Peak <b id="statPeak">0</b> • Waste <b id="statWaste">0%</b></div>
+        <div id="objectivePanel">
+            <span id="objectiveKicker">OBJECTIVE 1</span>
+            <b id="objectiveText">Establish Station defense</b>
+            <small id="objectiveDetail">Place one Pulse Laser</small>
+        </div>
+        <div id="mapLegend" aria-label="Map legend">
+            <span><i class="legend-mark station-mark"></i> Station</span>
+            <span><i class="legend-mark lane-mark"></i> Trade lane (bright = cargo home)</span>
+            <span><i class="legend-mark planet-mark"></i> Moon / belt / planet</span>
+            <span><i class="legend-mark unknown-mark"></i> ? Unsurveyed — send scout</span>
+            <span><i class="legend-mark corr-mark"></i> Corrupted world — purge!</span>
+            <span><i class="legend-mark star-mark"></i> Star (Sol)</span>
+            <span><i class="legend-mark planet-mark"></i> Planet / moon</span>
+            <span><i class="legend-mark myc-mark"></i> Mycelium voxel</span>
+            <span><i class="legend-mark heart-mark"></i> Heart — slay all!</span>
+        </div>
+        <div id="nodeTooltip" class="hidden"></div>
+        <div id="toast" class="hidden"></div>
+        <div id="eventLogWrap">
+            <div id="eventLogHead"><span>◈ EVENT LOG</span><button id="logToggle" class="ghost small">–</button></div>
+            <div id="eventLog"></div>
+        </div>
+        <div id="tutorialHint" class="hidden">
+            <div class="tut-arrow">▼</div>
+            <div class="tut-text">Buy a Relay Drone, then CLICK a gold world 👇<br><small>Farm in peace… but zoom OUT when you're curious</small></div>
+            <button id="tutDismiss" class="ghost small">GOT IT</button>
+        </div>
+
+
+    </div>
+
+    <div id="screens">
+        <div id="mainMenu" class="screen active">
+            <h1>THE BLOOM</h1>
+            <p class="subtitle">A tiny station • A living system • Something growing in the dark</p>
+            <button id="playBtn">NEW EXPEDITION →</button>
+            <div class="menu-row">
+                <button id="howToPlayBtn" class="ghost">HOW TO PLAY</button>
+            </div>
+            <div id="menuStats">
+                <div class="menu-stats-row">
+                    <span>Best Threat <b id="statBestWave">0</b></span>
+                    <span>Best Kills <b id="statBestKills">0</b></span>
+                    <span>Runs <b id="statRuns">0</b></span>
+                </div>
+                <div class="menu-stats-row sub">
+                    <span>Total Kills <b id="statTotalKills">0</b></span>
+                    <span>Total Gold <b id="statTotalCoins">0</b></span>
+                </div>
+                <div class="menu-stats-row sub">
+                    <span>Systems liberated <b id="statLiberated">0</b></span>
+                    <span>Visited <b id="statVisited">1</b></span>
+                </div>
+                <div id="statLastRun" class="menu-last-run">No runs yet — press DEFEND</div>
+                <div id="seedDisplay" class="menu-last-run">Weekly Seed <b id="seedVal">-</b> <button id="copySeedBtn" class="ghost small" style="min-width:auto;padding:4px 8px;font-size:10px;margin-left:6px">Copy</button> <button id="dailySeedBtn" class="ghost small" style="min-width:auto;padding:4px 8px;font-size:10px">Daily</button></div>
+            </div>
+        </div>
+
+        <div id="howToPlayScreen" class="screen">
+            <h2>HOW TO PLAY</h2>
+            <div class="controls">
+                <h3>Relay Command — farm first, fight later</h3>
+                <p>You wake up in a quiet system: buy <b>Relay Drones</b>, link <b>Worlds</b> — moons, asteroid belts, planets — farm gold like a cozy idle game. The mycelium sleeps at the rim… until your first weapon wakes it. <b>Zoom out.</b> Then survive it by chaining <b>Station → World</b> lanes and hunting its hearts.</p>
+                <h3>Building &amp; caps</h3>
+                <p>Click a weapon in the bottom bar, then <b>click the map</b> to place it in orbit around the Station or a linked world (right-click cancels). Press <b>B</b> or the <b>–</b> button to collapse the bar and see behind it. Caps, always visible above the buttons: Station <b>3 weapons + 3 Hangar bays</b>, each world <b>2 weapons</b>. When a ring is full, <b>upgrade</b> instead of building.</p>
+                <h3>Station tech — grow your base</h3>
+                <p>CLICK the <b>Station itself</b> to open its tech panel. <b>Solar Array</b> mints gold on a timer (more wings appear per level); <b>Research Lab</b> boosts ALL pierce damage (watch the dishes sprout). Five levels each, costs rising — your base visibly grows more advanced all run long. <b>Command Center</b> speeds all drones and scouts (+8%/lv); <b>Navigation Array</b> extends uplink reach (+35/lv).</p>
+                <h3>Drones &amp; trade lanes — in order</h3>
+                <p><b>1.</b> Buy a Relay Drone in the bottom bar (available immediately — this is your idle game). <b>2.</b> CLICK a glowing <b>gold world</b> to send the idle drone there — it opens the lane, mines ore, and ferries <b>gold home per trip</b> (5–8g by world). Watch the lane: bright packets are cargo heading home, dim ones are empty drones heading out. Frontier worlds start UNSURVEYED (?) — buy a <b>Scout Drone</b> and click one: charting pays 8g, derelicts hide +25g salvage, and strange discoveries happen. <b>3.</b> Build a <b>Hangar Bay first</b>: +1 drone slot, +120 uplink range, and faster crews per level. At Lv3 choose THROUGHPUT (faster mining and better delivery) or RANGE (longer relays). <b>4.</b> Click its world again to recall it. Purple-smothered worlds refuse drones until purged.</p>
+                <h3>Routes pay differently (strategy)</h3>
+                <p><b>Moons</b> are safe and fast (5g, quick crews), <b>Belts</b> are the industrial core (7g), <b>Planets</b> pay frontier rates (8g, slow), <b>Derelicts</b> leak tech (+2 purge per delivery). Infected ground pays <b>+2g hazard pay</b> — hold it or purge it. A gun parked on a world escorts its crews (faster mining).</p>
+                <h3>Reaching far worlds (heart hunting)</h3>
+                <p>Four ways outward: <b>Station range</b> (~150), <b>Hangar uplink</b> (+120 per Hangar level — the long game), <b>parent chains</b> (link the world nearer the Station first), and <b>relay hops</b> (any LINKED world within 300px bounces drones further). Hover a world for its exact status; the log tells you what a locked one needs. Late game = hop lane-by-lane toward a ♥, park Railguns in range, burn it down.</p>
+                <p>Build keys are assigned left-to-right to the options currently available. Pulse Laser starts at <b>1</b>; new weapons, drones, and modules receive the next number as they unlock.</p>
+                <h3>The voxel cloud</h3>
+                <p>The mycelium is a living pixel cloud creeping in from the rim of a big scrollable galaxy (<b>drag</b> to pan, <b>wheel</b> to zoom, <b>WASD/arrows</b> pan too). It smothers worlds, blocks build spots, and drains the Station on touch. If voxels reach a world it slides EXPOSED → INFECTED (slow mining) → CORRUPTED (drones refused) → OVERRUN (feeds the cloud) — shoot the purple off to cure it. Every tower shoots automatically — Plasma splashes crowds, Cryo freezes spread, Tesla arcs, <b>Railgun</b> (Threat 4) snipes from extreme range.</p>
+                <h3>Hearts &amp; pods — how you win</h3>
+                <p><b>♥ Hearts</b> pulse at the rim and fountain new cloud. <b>Slay them ALL to free the galaxy.</b> Expand your trade lanes toward a heart, park towers in range (Railguns help!), and burn it down — +40g, +25 purge each. <b>Spore pods</b> bloom on the frontier and seed fast: pop them (+12g, +5 purge). Purging voxels still pays and hits gold milestones at 25/50/75%. Every heart spawns within Railgun reach of holdable ground — if it looks far, push your lanes forward and park the big gun on a linked world.</p>
+                <h3>Threat growth</h3>
+                <p>Buy Relay Drones to extend the lane chain and bring ore home. The cloud grows faster every threat level; every 10th level a <b>mutation surge</b> lunges inward.</p>
+                <h3>Upgrades — Branching!</h3>
+                <p>Click a tower → the panel shows its role, its slot (e.g. Station 2/3), and a live preview of the next level. Weapons specialize at <b>Lv2 → Lv3</b>: Power improves each weapon's signature output, while Pierce favors penetration and precision. Hangars choose logistics instead: THROUGHPUT improves mining and delivery, RANGE extends relays. Sell refunds 60%.</p>
+                <h3>Voxels, not walkers</h3>
+                <p>There are no creep units anymore — the cloud <b>is</b> the enemy. Aim is automatic: towers pick the most station-threatening voxel in range. Keep lanes clear and never let purple touch the Station.</p>
+                <p>Hotkeys: number keys build, <b>Space</b> force the next surge, <b>B</b> collapse the build bar, <b>WASD/arrows</b> pan, <b>wheel</b> zoom, <b>Esc</b> cancel/deselect, <b>P</b> pause.</p>
+                <p>Survive <b>Threat Level 12</b> to unlock the <b>WARP MAP</b> — Fertile, Infested, or Ancient systems, each with its own bounty and hunger. Slay every heart (the <b>PRIMARY</b> is fortified, the last one screams) to <b>LIBERATE</b> the system — then warp on, <b>KEEP PURGING</b> into endless cycles, or stand down. Far worlds are <b>RICH</b>: the deeper you expand, the more ore each trip brings home.</p>
+            </div>
+            <button id="backBtn">BACK</button>
+        </div>
+
+        <div id="upgradeShopScreen" class="screen">
+            <div id="shopHeader">
+                <h2>PERMANENT UPGRADES</h2>
+                <p class="stage-clear-sub">Towers unlock as you survive • Drones expand your empire • Max Lv.10 <span id="prestigeBadge" class="owned-badge hidden">★ Prestige 0</span></p>
+                <div id="shopCoins"><span class="coin"></span> <span id="shopCoinCount">0</span></div>
+                <div id="shopFilter">
+                    <button data-filter="all" class="ghost small active">All</button>
+                    <button data-filter="tower" class="ghost small">Towers</button>
+                    <button data-filter="stats" class="ghost small">Stats</button>
+                </div>
+            </div>
+            <div id="shopItems"></div>
+            <div id="shopFooter">
+                <button id="shopBackBtn">BACK</button>
+                <span class="shop-hint">Esc to close • Unlocks stay forever</span>
+            </div>
+        </div>
+
+        <div id="gameOverScreen" class="screen">
+            <h2 id="gameOverTitle">DEFEAT</h2>
+            <div id="newBest" class="new-best hidden">★ NEW BEST! ★</div>
+            <div id="finalStats">
+                <p>Threat Level: <span id="finalWave">1</span> • Kills: <span id="finalKills">0</span></p>
+                <p>Gold Earned: <span id="finalCoins">0</span></p>
+                <div class="final-grid">
+                    <span>Bosses <b id="finalBosses">0</b></span>
+                    <span>Damage <b id="finalDamage">0</b></span>
+                    <span>Towers <b id="finalTowers">0</b></span>
+                </div>
+                <p class="sub-stat">Best Threat: <span id="finalBestWave">0</span> • Seed: <span id="finalSeed">-</span> <button id="copySeedBtn2" class="ghost small" style="min-width:auto;padding:4px 8px;font-size:10px;margin-left:6px">Copy Seed</button></p>
+                <p class="sub-stat">Purged: <span id="finalPurge">0</span> • Time: <span id="finalTime">0:00</span></p>
+            </div>
+            <button id="restartBtn">DEFEND AGAIN</button>
+            <button id="endlessBtn" class="hidden">KEEP PURGING ∞</button>
+            <button id="toUpgradesBtn" class="ghost">UPGRADES</button>
+            <button id="menuBtn" class="ghost">MAIN MENU</button>
+        </div>
+
+        <div id="stageClearScreen" class="screen">
+            <h2>✦ SYSTEM LIBERATED ✦</h2>
+            <p class="stage-clear-sub">The network recoils — this sky is yours.</p>
+            <div id="stageClearStats" class="final-grid">
+                <span>Threat <b id="clearWave">0</b></span>
+                <span>Kills <b id="clearKills">0</b></span>
+                <span>Bosses <b id="clearBosses">0</b></span>
+                <span>Bonus <b id="clearBonus">0</b></span>
+                <span>Total <b id="clearTotal">0</b></span>
+            </div>
+            <p class="sub-stat">Systems liberated: <b id="clearLiberated">0</b></p>
+            <button id="stageWarpBtn">WARP TO NEW SYSTEM ✦</button>
+            <button id="libEndlessBtn" class="ghost">KEEP PURGING ∞</button>
+            <button id="stageMenuBtn" class="ghost">MAIN MENU</button>
+        </div>
+
+        <div id="warpScreen" class="screen">
+            <h2>WARP MAP</h2>
+            <p class="stage-clear-sub">Choose the next system to liberate • keys 1-3 • Esc back</p>
+            <div id="warpChoices"></div>
+            <button id="warpBackBtn" class="ghost">BACK</button>
+        </div>
+
+        <div id="pauseScreen" class="screen">
+            <h2>PAUSED</h2>
+            <button id="resumeBtn">RESUME (Esc)</button>
+            <button id="pauseToMenuBtn" class="ghost">ABANDON RUN</button>
+        </div>
+
+    </div>
+
+    <script src="game.js"></script>
+</body>
+</html>
