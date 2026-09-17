@@ -22,7 +22,8 @@ body{font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;background:
 .ghost.small{pointer-events:auto;min-width:auto;padding:7px 10px;font-size:11px}
 
 /* BUILD BAR - compact, not covering map center */
-#buildBar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(2,6,23,0.92);border:2px solid #1e293b;border-top:3px solid var(--accent);border-radius:2px;padding:8px 10px;display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:auto;backdrop-filter:blur(10px);max-width:min(640px,94vw);box-shadow:4px 4px 0 rgba(0,0,0,0.6);transition:opacity .2s, transform .2s}
+#buildBar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(2,6,23,0.92);border:2px solid #1e293b;border-top:3px solid var(--accent);border-radius:2px;padding:8px 10px;display:flex;flex-direction:row;gap:10px;align-items:center;pointer-events:auto;backdrop-filter:blur(10px);max-width:min(720px,94vw);box-shadow:4px 4px 0 rgba(0,0,0,0.6);transition:opacity .2s, transform .2s}
+#buildMain{display:flex;flex-direction:column;gap:6px;align-items:center;min-width:0}
 #buildBar.collapsed{transform:translateX(-50%) translateY(6px) scale(0.97);opacity:0.65}
 .build-title{font-size:8px;letter-spacing:0.6px;opacity:0.5;font-weight:700;text-align:center}
 #buildButtons{display:flex;gap:6px;flex-wrap:nowrap;justify-content:center;overflow-x:auto;max-width:100%;scrollbar-width:none}
@@ -47,6 +48,28 @@ body{font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;background:
 #buildBar.minimized{padding:6px}
 #buildBar.minimized #buildButtons,#buildBar.minimized .build-title{display:none}
 #buildBar.minimized #barTopRow{width:auto}
+#buildBar.minimized #purgeRow{display:none}
+/* CORE PURGE dial — old spacecraft instrumentation, not a game ability icon:
+   circular steel control with concentric rings + amber status lights. */
+#purgeRow{display:flex;flex-direction:column;align-items:center;gap:6px;justify-content:center;border-right:1px solid rgba(227,184,92,0.25);padding-right:10px;flex-shrink:0}
+#purgeDial{width:62px;height:62px;min-width:62px;border-radius:50%;padding:0;cursor:pointer;
+  background:radial-gradient(circle at 50% 42%,#2a3430 0%,#18211d 55%,#0b100e 100%);
+  border:3px solid #5a5344;color:#d4d9c9;font-family:inherit;
+  box-shadow:0 0 0 2px #080b10, 0 0 0 4px #39464b, 3px 3px 0 rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.12), inset 0 -6px 10px rgba(0,0,0,0.55);
+  position:relative;transition:filter .15s, transform .08s}
+#purgeDial::before{content:'';position:absolute;inset:7px;border-radius:50%;border:2px dashed rgba(212,217,201,0.28);pointer-events:none}
+#purgeDial span{font-size:9px;font-weight:800;letter-spacing:0.5px;line-height:1.2}
+#purgeDial.ready{border-color:#e3b85c;color:#ffe9b0;
+  box-shadow:0 0 0 2px #080b10, 0 0 0 4px #e3b85c, 0 0 16px rgba(227,184,92,0.5), inset 0 2px 0 rgba(255,255,255,0.2);
+  animation:purgeReady 1.6s infinite alternate}
+#purgeDial.ready::before{border-color:rgba(227,184,92,0.7)}
+#purgeDial.charging{border-color:#fef9c3;animation:purgeCharge 0.3s infinite alternate}
+#purgeDial.locked{filter:grayscale(0.8) brightness(0.7);cursor:not-allowed}
+#purgeDial:active:not(.locked){transform:scale(0.95)}
+@keyframes purgeReady{from{box-shadow:0 0 0 2px #080b10,0 0 0 4px #e3b85c,0 0 8px rgba(227,184,92,0.3),inset 0 2px 0 rgba(255,255,255,0.2)}to{box-shadow:0 0 0 2px #080b10,0 0 0 4px #e3b85c,0 0 20px rgba(227,184,92,0.65),inset 0 2px 0 rgba(255,255,255,0.2)}}
+@keyframes purgeCharge{from{filter:brightness(1)}to{filter:brightness(1.5)}}
+#purgeHint{font-size:8px;letter-spacing:0.4px;color:#c9c2ab;font-weight:700;text-align:center;line-height:1.4;max-width:110px}
+#purgeHint b{color:#e3b85c}
 .tech-row{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px;margin-top:6px}
 .tech-head{display:flex;justify-content:space-between;font-size:11px;gap:6px}
 .tech-pips{color:var(--accent2);letter-spacing:2px;font-size:10px;white-space:nowrap}
@@ -216,6 +239,8 @@ button:disabled, button.disabled{opacity:0.45;filter:grayscale(0.7);cursor:not-a
   #eventLog{max-height:96px;font-size:8.5px}
   #toast{top:104px;font-size:10px;max-width:92vw}
   #buildBar{bottom:8px;padding:6px 8px}
+  #purgeDial{width:50px;height:50px;min-width:50px}
+  #purgeHint{max-width:84px;font-size:7px}
   .tower-btn{width:78px;min-width:78px;padding:5px 3px}
   #towerPanel{top:auto;bottom:68px;right:6px;left:6px;width:auto;max-height:42vh}
   #topBar{font-size:11px;gap:6px}
