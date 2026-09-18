@@ -289,6 +289,7 @@ const SCOUT_MAX=2;
 let preferredAsteroid=null; // player choice where drones go
 // --- pixel-cloud mycelium state ---
 let mycCells=new Map(); // key "cx,cy" -> {cx,cy,hp,maxHp,age,seed,slowUntil,flash}
+let mycKeyCache=[], mycKeyCacheT=0;
 let mycGrowthAcc=0;
 let mycTouchAcc=0;
 let mycNearStation=false;
@@ -736,7 +737,7 @@ function bloomLeashed(x,y){
 // the organism holds its mass until the player carves into it — then it
 // regrows into the freed space. Carve, and it comes back. Ignore it, and it
 // sits there. Forever.
-const MYC_CAP=12000;
+const MYC_CAP=24000;
 function mycCapped(){ return mycCells.size>=MYC_CAP; }
 // DISTANT BLOOM LEDGER: the gameplay cap (MYC_CAP) must never READ as a cap.
 // Refused growth isn't lost — it's recorded per 128px chunk as aggregate
@@ -822,7 +823,7 @@ function initMyceliumEdges(seedRing){
 }
 function mycSurge(n){
   // threat surge: infect n random frontier-adjacent empties
-  const keys=[...mycCells.keys()];
+  const keys=mycKeyCache.length?mycKeyCache:[...mycCells.keys()];
   if(!keys.length) return;
   for(let i=0;i<n;i++){
     const k=keys[Math.floor(Math.random()*keys.length)];
@@ -2161,12 +2162,17 @@ function myceliumGrowStep(ddt){
   }
   let guard=0;
   const capped=mycCapped();
+  // cached key array: [...24k keys] per attempt would churn GC to death
+  if(!mycKeyCacheT || now-mycKeyCacheT>0.5 || !mycKeyCache.length){
+    mycKeyCache=[...mycCells.keys()];
+    mycKeyCacheT=now;
+  }
+  const keys=mycKeyCache;
   while(mycGrowthAcc>=interval && guard++<6){
     mycGrowthAcc-=interval;
     if(capped) continue; // at cap: hold mass, skip the doomed rolls entirely
     const attempts=Math.max(1, Math.round((2+Math.floor(wave/3)+galaxy)*ramp));
     for(let i=0;i<attempts;i++){
-      const keys=[...mycCells.keys()];
       if(!keys.length) break;
       const cell=mycCells.get(keys[Math.floor(Math.random()*keys.length)]);
       if(!cell) continue;
@@ -3136,6 +3142,13 @@ let keys={};
 addEventListener('keydown', e=>{
   const k=e.key.toLowerCase();
   keys[k]=true;
+  // TEMPORARY TEST CHEAT — REMOVE BEFORE RELEASE. Type 1993 in-game:
+  // all lanes linked+surveyed, station tech maxed, 2× max Pulse Lasers
+  // per world (free). Early digits may arm build ghosts; firing cleans up.
+  if(state===STATE.PLAYING && /^[0-9]$/.test(k)){
+    cheatBuf=(cheatBuf+k).slice(-4);
+    if(cheatBuf==='1993'){ cheatBuf=''; cheat1993(); return; }
+  }
   if((e.ctrlKey || e.metaKey) && k==='z' && state===STATE.PLAYING){ e.preventDefault(); doUndo(); return; }
   if(k===' ' && state===STATE.PLAYING){ e.preventDefault(); buyCorePurge(); }
   if(k==='x' && state===STATE.PLAYING){ e.preventDefault(); ensureAudio(); armStrike(); updateBuildBar(); }
@@ -3182,6 +3195,33 @@ function triggerNextWave(){
   // Space now holds the emergency Core Purge instead.
   buyCorePurge();
 }
+// TEMPORARY TEST CHEAT — REMOVE BEFORE RELEASE (search CHEAT1993).
+let cheatBuf='';
+function cheat1993(){
+  for(const a of asteroids){ a.unlocked=true; a.surveyed=true; }
+  for(const id of Object.keys(STATION_TECH)) stationTech[id]=STATION_TECH[id].max;
+  const def=TOWER_DEFS.find(d=>d.id==='archer');
+  for(const a of asteroids){
+    for(let k=0;k<2;k++){
+      const orbitR=a.r+26, orbitAng=k*Math.PI+(a.slotAng||0);
+      const anchor={type:'asteroid', obj:a, dist:0};
+      towers.push({x:a.x+Math.cos(orbitAng)*orbitR, y:a.y+Math.sin(orbitAng)*orbitR, r:16,
+        id:def.id, baseCost:def.cost, baseDmg:def.dmg, baseRange:def.range, baseFireRate:def.fireRate, projSpeed:def.projSpeed,
+        splash:0, chain:0, slow:0, slowDur:0, color:def.color, icon:def.icon, name:def.name,
+        isModule:false, mod:null, level:5, branch:null, cd:0, angle:orbitAng,
+        anchor, orbitR, orbitAngle:orbitAng, orbitSpeed:0.24+Math.random()*0.10});
+      towersBuilt++;
+    }
+  }
+  if(!defenseEstablished){ defenseEstablished=true; waveTimer=5; logEvent('BIOLOGICAL ACTIVITY — deep-field signal registered.', 'surge'); }
+  placeType=null; ghostPos=null; selectedTower=null; hidePanel();
+  if(selectedStation) showStationPanel();
+  console.warn('[TEST CHEAT 1993] lanes+tech+maxed lasers applied — REMOVE BEFORE RELEASE');
+  logEvent('<b>[TEST] Cheat 1993:</b> all lanes linked, station tech maxed, 2× max Pulse Lasers per world. <b>REMOVE BEFORE RELEASE.</b>', 'surge');
+  toast('[TEST] 1993 APPLIED — remove before release', 'surge');
+  SFX.wave();
+  updateBuildBar();
+}
 function findCloudTarget(tx,ty,range){
   // pods, clusters & hearts pull tower aim (magnets), voxels win by station-threat
   let ent=null, entD=1e18;
@@ -3213,8 +3253,13 @@ function findCloudTarget(tx,ty,range){
   }
   let best=null, bestScore=1e18, bestD=1e18;
   const r2=range*range;
-  for(const cell of mycCells.values()){
-    const c=mycCellCenter(cell.cx,cell.cy);
+  // grid-restricted scan: only cells in the range box are candidates.
+  // Identical results to a full scan at a fraction of the cost as mass grows.
+  const q0=mycWorldToCell(tx-range,ty-range), q1=mycWorldToCell(tx+range,ty+range);
+  for(let qx=q0.cx;qx<=q1.cx;qx++) for(let qy=q0.cy;qy<=q1.cy;qy++){
+    const cell=mycCells.get(mycKey(qx,qy));
+    if(!cell) continue;
+    const c=mycCellCenter(qx,qy);
     const dx=c.x-tx, dy=c.y-ty;
     const d2=dx*dx+dy*dy;
     if(d2>r2) continue;
