@@ -22,7 +22,7 @@ body{font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;background:
 .ghost.small{pointer-events:auto;min-width:auto;padding:7px 10px;font-size:11px}
 
 /* BUILD BAR - compact, not covering map center */
-#buildBar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(2,6,23,0.92);border:2px solid #1e293b;border-top:3px solid var(--accent);border-radius:2px;padding:8px 10px;display:flex;flex-direction:row;gap:10px;align-items:center;pointer-events:auto;backdrop-filter:blur(10px);max-width:min(720px,94vw);box-shadow:4px 4px 0 rgba(0,0,0,0.6);transition:opacity .2s, transform .2s}
+#buildBar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(2,6,23,0.92);border:2px solid #1e293b;border-top:3px solid var(--accent);border-radius:2px;padding:8px 10px;display:flex;flex-direction:row;gap:10px;align-items:center;pointer-events:auto;backdrop-filter:blur(10px);max-width:min(780px,96vw);box-shadow:4px 4px 0 rgba(0,0,0,0.6);transition:opacity .2s, transform .2s}
 #buildMain{display:flex;flex-direction:column;gap:6px;align-items:center;min-width:0}
 #buildBar.collapsed{transform:translateX(-50%) translateY(6px) scale(0.97);opacity:0.65}
 .build-title{font-size:8px;letter-spacing:0.6px;opacity:0.5;font-weight:700;text-align:center}
@@ -49,6 +49,7 @@ body{font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;background:
 #buildBar.minimized #buildButtons,#buildBar.minimized .build-title{display:none}
 #buildBar.minimized #barTopRow{width:auto}
 #buildBar.minimized #purgeRow{display:none}
+#buildBar.minimized #strikeRow{display:none}
 /* CORE PURGE dial — old spacecraft instrumentation, not a game ability icon:
    circular steel control with concentric rings + amber status lights. */
 #purgeRow{display:flex;flex-direction:column;align-items:center;gap:6px;justify-content:center;border-right:1px solid rgba(227,184,92,0.25);padding-right:10px;flex-shrink:0}
@@ -70,6 +71,28 @@ body{font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;background:
 @keyframes purgeCharge{from{filter:brightness(1)}to{filter:brightness(1.5)}}
 #purgeHint{font-size:8px;letter-spacing:0.4px;color:#c9c2ab;font-weight:700;text-align:center;line-height:1.4;max-width:110px}
 #purgeHint b{color:#e3b85c}
+/* STRIKE WING dial — the twin instrument, opposite side. Same steel, cold
+   cyan lights instead of amber: ships, not energy. Wing chevrons, not rings. */
+#strikeRow{display:flex;flex-direction:column;align-items:center;gap:6px;justify-content:center;border-left:1px solid rgba(125,211,252,0.25);padding-left:10px;flex-shrink:0}
+#strikeDial{width:62px;height:62px;min-width:62px;border-radius:50%;padding:0;cursor:pointer;
+  background:radial-gradient(circle at 50% 42%,#232e33 0%,#141d21 55%,#0b100e 100%);
+  border:3px solid #5a5344;color:#d4d9c9;font-family:inherit;
+  box-shadow:0 0 0 2px #080b10, 0 0 0 4px #39464b, 3px 3px 0 rgba(0,0,0,0.6), inset 0 2px 0 rgba(255,255,255,0.12), inset 0 -6px 10px rgba(0,0,0,0.55);
+  position:relative;transition:filter .15s, transform .08s}
+#strikeDial::before{content:'';position:absolute;left:50%;top:50%;width:26px;height:26px;transform:translate(-50%,-50%);pointer-events:none;
+  border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:11px solid rgba(125,211,252,0.4)}
+#strikeDial::after{content:'';position:absolute;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-38%);pointer-events:none;
+  border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:7px solid rgba(125,211,252,0.55)}
+#strikeDial span{font-size:9px;font-weight:800;letter-spacing:0.5px;line-height:1.2;position:relative;z-index:1}
+#strikeDial.ready{border-color:#7dd3fc;color:#e0f2fe;
+  box-shadow:0 0 0 2px #080b10, 0 0 0 4px #7dd3fc, 0 0 16px rgba(125,211,252,0.5), inset 0 2px 0 rgba(255,255,255,0.2);
+  animation:strikeReady 1.6s infinite alternate}
+#strikeDial.arming{border-color:#fef9c3;animation:purgeCharge 0.3s infinite alternate}
+#strikeDial.locked{filter:grayscale(0.8) brightness(0.7);cursor:not-allowed}
+#strikeDial:active:not(.locked){transform:scale(0.95)}
+@keyframes strikeReady{from{box-shadow:0 0 0 2px #080b10,0 0 0 4px #7dd3fc,0 0 8px rgba(125,211,252,0.3),inset 0 2px 0 rgba(255,255,255,0.2)}to{box-shadow:0 0 0 2px #080b10,0 0 0 4px #7dd3fc,0 0 20px rgba(125,211,252,0.65),inset 0 2px 0 rgba(255,255,255,0.2)}}
+#strikeHint{font-size:8px;letter-spacing:0.4px;color:#c9c2ab;font-weight:700;text-align:center;line-height:1.4;max-width:110px}
+#strikeHint b{color:#7dd3fc}
 .tech-row{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px;margin-top:6px}
 .tech-head{display:flex;justify-content:space-between;font-size:11px;gap:6px}
 .tech-pips{color:var(--accent2);letter-spacing:2px;font-size:10px;white-space:nowrap}
@@ -241,6 +264,8 @@ button:disabled, button.disabled{opacity:0.45;filter:grayscale(0.7);cursor:not-a
   #buildBar{bottom:8px;padding:6px 8px}
   #purgeDial{width:50px;height:50px;min-width:50px}
   #purgeHint{max-width:84px;font-size:7px}
+  #strikeDial{width:50px;height:50px;min-width:50px}
+  #strikeHint{max-width:84px;font-size:7px}
   .tower-btn{width:78px;min-width:78px;padding:5px 3px}
   #towerPanel{top:auto;bottom:68px;right:6px;left:6px;width:auto;max-height:42vh}
   #topBar{font-size:11px;gap:6px}
@@ -279,6 +304,7 @@ body.menu-state #ui{visibility:hidden}
 #eventLogWrap{border-radius:1px;background:rgba(5,8,14,.96);backdrop-filter:none}
 #eventLogHead{border-bottom-color:rgba(227,184,92,.25);color:#b4d0b0}
 #buildBar{background-image:repeating-linear-gradient(0deg,rgba(255,255,255,.025) 0 1px,transparent 1px 4px)}
+#mainMenu.screen{background:linear-gradient(rgba(5,8,14,0.78),rgba(5,8,14,0.78)), url('the-bloom.png') center/cover no-repeat, rgba(5,8,14,0.74);backdrop-filter:none}
 #mainMenu{gap:12px}
 #mainMenu h1{margin-bottom:2px}
 #mainMenu #menuStats{background:rgba(5,8,14,.74);border-color:rgba(180,208,176,.28)}

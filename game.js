@@ -48,6 +48,13 @@ function centerCam(){
   cam.x=WORLD.w/2-W/2; cam.y=WORLD.h/2-H/2;
   clampCam();
 }
+// Run start framing: zoom FIRST, then center — so the station (WORLD center)
+// lands exactly in the middle of the screen at any zoom.
+function centerOnStation(zoom){
+  cam.zoom=zoom;
+  cam.x=WORLD.w/2-W/(2*cam.zoom); cam.y=WORLD.h/2-H/(2*cam.zoom);
+  clampCam();
+}
 function zoomAt(sx,sy,f){
   const before=screenToWorld(sx,sy);
   // STATION 2.2 → LOCAL → PLANETARY → SYSTEM → DEEP 0.22: one continuous discovery.
@@ -731,14 +738,55 @@ function bloomLeashed(x,y){
 // sits there. Forever.
 const MYC_CAP=12000;
 function mycCapped(){ return mycCells.size>=MYC_CAP; }
+// DISTANT BLOOM LEDGER: the gameplay cap (MYC_CAP) must never READ as a cap.
+// Refused growth isn't lost — it's recorded per 128px chunk as aggregate
+// pressure {lx,ly,x,y,pressure}. Far zoom renders pressure as haze; when the
+// player purges real voxels (budget frees), pressure materializes back into
+// live cells at its recorded ground. Distant fronts keep "growing" in
+// aggregate and return as geometry — promotion without simulating everything.
+const LEDGER_PX=128, LEDGER_MAX=400;
+let bloomLedger=new Map(); // "lx,ly" -> {lx,ly,x,y,pressure}
+function ledgerCredit(x,y,n){
+  const lx=Math.floor(x/LEDGER_PX), ly=Math.floor(y/LEDGER_PX);
+  const k=lx+','+ly;
+  let e=bloomLedger.get(k);
+  if(!e){
+    if(bloomLedger.size>=LEDGER_MAX){
+      const first=bloomLedger.keys().next().value;
+      if(first!=null) bloomLedger.delete(first);
+    }
+    e={lx,ly,x:lx*LEDGER_PX+LEDGER_PX/2,y:ly*LEDGER_PX+LEDGER_PX/2,pressure:0};
+    bloomLedger.set(k,e);
+  }
+  e.pressure=Math.min(60,e.pressure+(n||1));
+}
+function ledgerMaterialize(ddt){
+  // convert aggregate pressure back into living voxels when budget allows —
+  // throttled to a slow ooze so purging stays meaningful, regrowth inevitable
+  ledgerMaterialize.acc=(ledgerMaterialize.acc||0)+ddt;
+  if(ledgerMaterialize.acc<0.5) return;
+  ledgerMaterialize.acc=0;
+  if(mycCapped() || !bloomLedger.size) return;
+  let n=0;
+  for(const e of bloomLedger.values()){
+    if(e.pressure<=0) continue;
+    for(let k=0;k<3;k++){
+      const ox=(Math.random()-0.5)*180, oy=(Math.random()-0.5)*180;
+      const cc=mycWorldToCell(e.x+ox,e.y+oy);
+      if(infectCell(cc.cx,cc.cy)){ e.pressure--; break; }
+    }
+    if(e.pressure<=0) bloomLedger.delete(e.lx+','+e.ly);
+    if(++n>=4) break;
+  }
+}
 function infectCell(cx,cy,hp){
-  if(mycCapped()) return false; // hold mass — never eat the old to feed the new
   const k=mycKey(cx,cy);
   if(mycCells.has(k)) return false;
   const c=mycCellCenter(cx,cy);
   // keep a safe bubble around the station at spawn; the cloud earns its way in
   if(Math.hypot(c.x-CORE.x,c.y-CORE.y) < CORE.r+34) return false;
   if(bloomLeashed(c.x,c.y)) return false;
+  if(mycCapped()){ ledgerCredit(c.x,c.y,1); return false; } // held as pressure, not lost
   const h=hp||mycCellHP();
   mycCells.set(k,{cx,cy,hp:h,maxHp:h,age:0,seed:Math.random()*6.28,slowUntil:0});
   return true;
@@ -790,10 +838,15 @@ function mycSurge(n){
 let hearts=[]; // {x,y,r,hp,maxHp,seed,emitAcc,flash,primary,tendrilAcc} — biological sources
 let pods=[];   // {x,y,r,hp,maxHp,seed,emitAcc,flash} — fast spreaders, pop for purge
 let clusters=[]; // {x,y,r,age,matureAt,seed,emitAcc,flash,hp,maxHp} — tendril colonies; mature into hearts
+let cores=[]; // {x,y,r,hp,maxHp,seed,emitAcc,tendrilAcc,flash} — merged colony organs. Siege them: clear the colony, expose the core.
 let podTimer=10;
 let mile25=false, mile50=false, mile75=false;
 // M9: per-system liberation ledger (reset each run/warp, fed by placeHearts + kills)
 let sysHeartsTotal=0, sysHeartsSlain=0, finalPush=false;
+// Colony engine: established hearts bud daughters nearby (validated), so the
+// Bloom forms dense colonies that can merge — not just scattered singles.
+// Capped: tendril/cluster reproduction handles the long range.
+let budAcc=25;
 // Continuous-expedition cycle: quiet after a clearing, then a whisper, then return.
 let bloomCalm=0, nextBloomIn=0, bloomWhispered=false, bloomCycles=0;
 function liberationPct(){
@@ -831,9 +884,13 @@ function placeHearts(n){
 // The maximum fully-upgraded Railgun reach defines the maximum valid distance
 // for a newly spawned heart: every heart must have at least one firing
 // solution from holdable ground. Candidates are validated; rejects are retried.
+// A Bloom Core commands its territory: no new heart roots in its shadow.
+// (Cores themselves still form by merge — that IS the colony condensing.)
+const CORE_EXCLUDE=420;
 function validHeartSpot(x,y){
   if(bloomLeashed(x,y)) return false;
   if(Math.hypot(x-CORE.x,y-CORE.y)<220) return false; // never on the doorstep
+  for(const c of cores){ if(Math.hypot(x-c.x,y-c.y)<CORE_EXCLUDE) return false; } // a core's ground
   for(const a of asteroids){ if(Math.hypot(x-a.x,y-a.y)<a.r+40) return false; } // not inside a world
   for(const p of planets){
     if(Math.hypot(x-p.x,y-p.y)<p.r+40) return false; // not inside a planet
@@ -895,7 +952,26 @@ function bloomRepose(){
 function updateBloomCycle(ddt){
   if(state!==STATE.PLAYING || !defenseEstablished) return;
   if(bloomCalm>0){ bloomCalm-=ddt; return; }
-  if(hearts.length>0 || clusters.length>6) return; // organism already present
+  // Budding: an established heart roots a daughter nearby — colonies form,
+  // colonies can merge. Capped so tendril/cluster play owns the long range.
+  budAcc+=ddt;
+  if(budAcc>50 && hearts.length>0 && hearts.length+cores.length<8 && clusters.length<6){
+    budAcc=0;
+    const h=hearts[Math.floor(Math.random()*hearts.length)];
+    for(let k=0;k<6;k++){
+      const a=Math.random()*Math.PI*2, rr=180+Math.random()*120;
+      const bx=h.x+Math.cos(a)*rr, by=h.y+Math.sin(a)*rr;
+      if(!validHeartSpot(bx,by)) continue;
+      const hp=Math.floor(heartHP()*0.9);
+      hearts.push({x:bx,y:by,r:26,hp,maxHp:hp,primary:false,seed:Math.random()*6.28,emitAcc:0,tendrilAcc:10,flash:0});
+      sysHeartsTotal++;
+      for(let q=0;q<10;q++) infectCell(Math.floor(bx/PIX)+Math.floor(Math.random()*7)-3, Math.floor(by/PIX)+Math.floor(Math.random()*7)-3);
+      logEvent('<b>A heart buds a daughter colony nearby.</b> Density is building — break clusters early.', 'surge');
+      addParticles(bx,by,20,'#fb7185',120);
+      break;
+    }
+  }
+  if(hearts.length>0 || cores.length>0 || clusters.length>6) return; // organism present
   // Only the true quiet schedules a return — clusters maturing handle the rest.
   if(hearts.length===0 && clusters.length===0){
     if(nextBloomIn<=0) return;
@@ -928,38 +1004,58 @@ function updateBloomCycle(ddt){
 // Tendrils are persistent travelers: they visibly grow from the heart across
 // space (up to ~900px), branch, infect cells along their path, and may seed a
 // cluster at the tip — even inside the fog. Mature clusters root into hearts.
-let tendrils=[]; // {pts, ang, speed, maxLen, traveled, wob, seed, branched, acc, hp, maxHp, stun, tipFlash}
-const TENDRIL_MAX=12;
+let tendrils=[]; // {pts, ang, speed, maxLen, traveled, wob, seed, branched, acc, hp, maxHp, stun, tipFlash, root?}
+const TENDRIL_MAX=16;
 function tendrilHP(){ return Math.floor(50 + wave*3 + threatTime*0.15); }
-function heartTendril(h){
-  if(tendrils.length>=TENDRIL_MAX) return;
-  // Aim: half the time at the player's network (a node or lane midpoint) so
-  // the two networks collide; otherwise into the dark.
-  let ang=Math.random()*Math.PI*2;
-  if(asteroids.length && Math.random()<0.5){
+// lenOverride/angOverride: cores grow short fixed ROOTS (real travelers with
+// cut-down range) alongside their long-range tendrils. Roots infect, stall
+// and sever exactly like any tendril — they ARE regular mycelium.
+// rootFlag {slot, core}: crown roots never branch; on arrival they go dormant
+// in place instead of fading.
+function heartTendril(h, lenOverride, angOverride, rootFlag){
+  if(activeTendrils()>=TENDRIL_MAX) return;
+  let ang=angOverride!=null?angOverride:Math.random()*Math.PI*2;
+  if(angOverride==null && asteroids.length && Math.random()<0.5){
     const t=asteroids[Math.floor(Math.random()*asteroids.length)];
     ang=Math.atan2(t.y-h.y, t.x-h.x)+(Math.random()-0.5)*0.6;
   }
   const hp=tendrilHP();
   tendrils.push({pts:[{x:h.x,y:h.y}], ang, speed:26+Math.random()*10,
-    maxLen:480+Math.random()*320+Math.min(300,threatTime*0.25),
-    traveled:0, wob:Math.random()*6.28, seed:Math.random()*6.28, branched:false, acc:0,
-    hp, maxHp:hp, stun:0, tipFlash:0});
+    maxLen:lenOverride!=null?lenOverride:(480+Math.random()*320+Math.min(300,threatTime*0.25)),
+    traveled:0, wob:Math.random()*6.28, seed:Math.random()*6.28, branched:!!rootFlag, acc:0,
+    hp, maxHp:hp, stun:0, tipFlash:0, fromCore:cores.includes(h),
+    root:rootFlag||null, slot:rootFlag?rootFlag.slot:0, core:rootFlag?rootFlag.core:null});
 }
-function seedClusterAt(tipX,tipY){
+// visuals only: newest dormant threads are kept (cells persist regardless)
+function pruneDormant(){
+  let dc=0;
+  for(const o of tendrils) if(o.dormant) dc++;
+  if(dc>40){
+    for(let j=0;j<tendrils.length;j++){
+      if(tendrils[j].dormant){ tendrils.splice(j,1); break; }
+    }
+  }
+}
+function seedClusterAt(tipX,tipY,ch){
   // Strategic window ("something is growing"): allowed NEAR nodes (pressure!)
   // but never inside one, never on the doorstep, never beyond the leash.
+  // ch: establishment chance (cores pass high; others default 1).
   if(clusters.length>=7 || bloomLeashed(tipX,tipY)) return;
   if(Math.hypot(tipX-CORE.x,tipY-CORE.y)<180) return;
   for(const a of asteroids){ if(Math.hypot(tipX-a.x,tipY-a.y)<a.r+6) return; }
+  for(const c of cores){ if(Math.hypot(tipX-c.x,tipY-c.y)<200) return; } // the core's own colony covers this ground
+  if(Math.random()>(ch==null?1:ch)) return; // default 1: callers hold their own lotteries
   const hp=Math.floor(70+wave*4+threatTime*0.35);
   clusters.push({x:tipX,y:tipY,r:12,age:0,matureAt:55+Math.random()*40,seed:Math.random()*6.28,emitAcc:0,flash:0,hp,maxHp:hp});
   logEvent('SENSOR — <b>new growth</b> spreading. Burn it before it roots.', 'surge');
   addParticles(tipX,tipY,10,'#c084fc',80);
 }
 // Counterplay: a growing tip can be SHOT. Hits stagger it (growth stalls
-// while nursing the wound); enough damage severs it outright. The voxels it
-// already laid down remain — purge those separately.
+// while nursing the wound); enough damage severs it outright.
+// SEVERED ≠ DELETED: the traveler halts and its thread goes dormant, but
+// every voxel it laid down REMAINS as territory. Dormant threads are visuals
+// only (capped); the colony is what you must still purge.
+function activeTendrils(){ let n=0; for(const t of tendrils) if(!t.done) n++; return n; }
 function tendrilTipAt(x,y,r){
   for(const t of tendrils){
     if(t.done) continue;
@@ -978,13 +1074,15 @@ function damageTendrilsAt(wx,wy,dmg,radius){
     hit=true;
     t.hp-=dmg; t.stun=Math.max(t.stun||0,0.6); t.tipFlash=0.15;
     totalDamage+=Math.min(dmg,Math.max(0,t.hp+dmg));
-    if(t.hp<=0){
-      tendrils.splice(i,1);
+    if(t.hp<=0 && !t.done){
+      // severed: halt forever, thread goes dormant, territory REMAINS
+      t.done=true; t.dormant=true; t.fade=1.5; t.tipFlash=0;
       kills++; purgeTotal+=2;
       addParticles(tip.x,tip.y,18,'#c084fc',130);
       addNum(tip.x,tip.y-12,'SEVERED','#e9d5ff');
       SFX.kill();
       checkMilestones();
+      pruneDormant();
     }
   }
   return hit;
@@ -1012,24 +1110,34 @@ function updateTendrils(ddt){
       if(Math.random()<0.3) infectCell(cc.cx+(Math.random()<0.5?1:-1),cc.cy+(Math.random()<0.5?1:-1));
     }
     // branch once, mid-journey: Heart A ── tendril ── Cluster ╲ Heart B
-    if(!t.branched && t.traveled>t.maxLen*0.4 && tendrils.length<TENDRIL_MAX && Math.random()<0.012){
+    if(!t.branched && t.traveled>t.maxLen*0.4 && activeTendrils()<TENDRIL_MAX && Math.random()<0.012){
       t.branched=true;
       const bhp=Math.max(20,Math.floor(t.maxHp*0.6));
       tendrils.push({pts:[{x:nx,y:ny}], ang:t.ang+(Math.random()<0.5?1:-1)*(0.6+Math.random()*0.4),
         speed:t.speed*0.9, maxLen:t.maxLen*0.55, traveled:0, wob:Math.random()*6.28,
-        seed:Math.random()*6.28, branched:true, acc:0, hp:bhp, maxHp:bhp, stun:0, tipFlash:0});
+        seed:Math.random()*6.28, branched:true, acc:0, hp:bhp, maxHp:bhp, stun:0, tipFlash:0, fromCore:t.fromCore});
     }
     // arrival: the tip roots a cluster and the traveler settles — its thread
     // fades out over seconds while the voxel colony it laid down REMAINS.
+    // Core roots instead go dormant in place: the crown persists as visible
+    // settled threads (same dormant state as severed tendrils).
     if(t.traveled>=t.maxLen || bloomLeashed(nx,ny)){
-      if(!bloomLeashed(nx,ny) && Math.random()<0.7) seedClusterAt(nx,ny);
-      t.done=true; t.fade=2.5;
+      // Core travelers push PAST the no-grow zone (long range) and establish
+      // reliably; heart travelers keep the old lottery.
+      if(!bloomLeashed(nx,ny)){
+        if(t.fromCore) seedClusterAt(nx,ny,0.9);
+        else if(Math.random()<0.7) seedClusterAt(nx,ny);
+      }
+      t.done=true;
+      if(t.root){ t.dormant=true; t.fade=1.5; pruneDormant(); }
+      else t.fade=2.5;
     }
   }
-  // settling threads fade; colonies persist
+  // settling + dormant threads retire here; the main loop skips done ones.
+  // arrivals fade out, severed threads persist (capped at sever time).
   for(let i=tendrils.length-1;i>=0;i--){
     const t=tendrils[i];
-    if(!t.done) continue;
+    if(!t.done||t.dormant) continue;
     t.fade-=ddt;
     if(t.fade<=0) tendrils.splice(i,1);
   }
@@ -1061,6 +1169,133 @@ function updateClusters(ddt){
     }
   }
 }
+// ===== BLOOM CORES: dense colonies evolve. 3+ hearts holding together inside
+// CORE_MERGE_R with living mycelium between them, stable for MERGE_HOLD
+// seconds, begin a visible merge — then one siege organ takes root.
+// The core is NOT a big heart: it grows a regenerating colony shield (damage
+// to the core scales down while the colony is dense — clear it first) while
+// sending long-range tendrils. Killing it removes the SOURCE; all territory,
+// threads and clusters remain for reclaiming.
+const CORE_MERGE_R=260, CORE_MERGE_HOLD=20, CORE_MERGE_DUR=8;
+let merging=null; // {members:[heart refs], t, x, y} | null
+let mergeSig='', mergeHold=0, mergeAcc=0;
+function coreHP(){ return Math.floor(heartHP()*4.5); }
+// While a Bloom Core lives, the WHOLE organism quickens: faster creep,
+// faster tendrils everywhere, more pods, harder surges. Kill the core and
+// the pressure lifts. This is the "oh shit" tax for letting one root.
+function corePressure(){ return Math.min(3, cores.length); }
+function updateMerge(ddt){
+  mergeAcc+=ddt;
+  if(mergeAcc<1) { if(merging) tickMerge(ddt); return; }
+  mergeAcc=0;
+  if(merging){ tickMerge(ddt); return; }
+  if(hearts.length<3 || state!==STATE.PLAYING || !defenseEstablished) { mergeSig=''; mergeHold=0; for(const h of hearts) h.mergeSync=false; return; }
+  // greedy colony: seed from each heart, absorb neighbours in radius
+  const groups=[];
+  const used=new Set();
+  for(let i=0;i<hearts.length;i++){
+    if(used.has(i)) continue;
+    const g=[i]; used.add(i);
+    for(let j=0;j<hearts.length;j++){
+      if(used.has(j)) continue;
+      if(g.some(k=>Math.hypot(hearts[k].x-hearts[j].x,hearts[k].y-hearts[j].y)<CORE_MERGE_R)){ g.push(j); used.add(j); }
+    }
+    if(g.length>=3) groups.push(g);
+  }
+  if(!groups.length){ mergeSig=''; mergeHold=0; for(const h of hearts) h.mergeSync=false; return; }
+  // richest colony first: most hearts, then most surrounding mycelium
+  groups.sort((a,b)=>b.length-a.length);
+  const g=groups[0];
+  const cx=g.reduce((n,k)=>n+hearts[k].x,0)/g.length;
+  const cy=g.reduce((n,k)=>n+hearts[k].y,0)/g.length;
+  if(countVoxelsNear(cx,cy,CORE_MERGE_R*0.75)<25){ mergeSig=''; mergeHold=0; for(const h of hearts) h.mergeSync=false; return; } // connected by living growth, not just near
+  const sig=g.slice().sort((a,b)=>a-b).join(',');
+  if(sig===mergeSig) mergeHold+=1;
+  else { mergeSig=sig; mergeHold=1; for(const h of hearts) h.mergeSync=false; }
+  for(const k of g){ const h=hearts[k]; if(h) h.mergeSync=true; }
+  if(mergeHold>=CORE_MERGE_HOLD && state===STATE.PLAYING){
+    merging={members:g.map(k=>hearts[k]).filter(Boolean), t:0, x:cx, y:cy};
+    mergeSig=''; mergeHold=0;
+    logEvent('<b>♥♥♥ The Bloom is merging.</b> Something large is taking root — break it apart NOW.', 'surge');
+    toast('♥♥♥ MERGE IN PROGRESS — KILL ONE HEART', 'surge');
+    SFX.sting(); shake=Math.min(8,shake+3);
+  }
+}
+function tickMerge(ddt){
+  const m=merging;
+  if(!m) return;
+  // abort if the player broke the colony mid-merge
+  m.members=m.members.filter(h=>hearts.includes(h));
+  if(m.members.length<3){
+    for(const h of hearts) h.mergeSync=false;
+    merging=null;
+    logEvent('Merge disrupted — the colony scatters.', 'good');
+    return;
+  }
+  m.t+=ddt;
+  const cx=m.members.reduce((n,h)=>n+h.x,0)/m.members.length;
+  const cy=m.members.reduce((n,h)=>n+h.y,0)/m.members.length;
+  m.x=cx; m.y=cy;
+  // densify between them: the mass they disappear into
+  const cc=mycWorldToCell(cx,cy);
+  for(let k=0;k<4;k++) infectCell(cc.cx+Math.floor(Math.random()*11)-5, cc.cy+Math.floor(Math.random()*11)-5);
+  if(Math.random()<0.4) addParticles(cx+(Math.random()-0.5)*120,cy+(Math.random()-0.5)*120,3,'#c084fc',60);
+  if(m.t>=CORE_MERGE_DUR){
+    for(const h of m.members){
+      const hi=hearts.indexOf(h);
+      if(hi>=0){ hearts.splice(hi,1); sysHeartsSlain++; }
+    }
+    for(const h of hearts) h.mergeSync=false;
+    const hp=coreHP();
+    cores.push({x:cx,y:cy,r:46,hp,maxHp:hp,seed:Math.random()*6.28,emitAcc:0,tendrilAcc:3,flash:0});
+    sysHeartsTotal++;
+    merging=null;
+    addParticles(cx,cy,60,'#881337',220);
+    addParticles(cx,cy,40,'#e9d5ff',180);
+    shake=9; SFX.boom();
+    logEvent('<b>◉ A BLOOM CORE has rooted.</b> Siege it: clear the colony, expose the core — the territory stays even if it falls.', 'surge');
+    toast('◉ BLOOM CORE ROOTED', 'surge');
+    if(hearts.length===0 && cores.length>0){ finalPush=true; }
+  }
+}
+function updateCores(ddt){
+  for(const c of cores){
+    if(c.flash>0) c.flash-=ddt;
+    // LOCAL growth: dense regenerating colony shield around the core.
+    // A core out-grows a heart several times over — its ground is expensive.
+    c.emitAcc=(c.emitAcc||0)+ddt;
+    if(c.emitAcc>0.4){
+      c.emitAcc=0;
+      const cc=mycWorldToCell(c.x,c.y);
+      for(let k=0;k<7;k++) infectCell(cc.cx+Math.floor(Math.random()*17)-8, cc.cy+Math.floor(Math.random()*17)-8);
+    }
+    // LONG-RANGE growth: tendrils keep leaving the colony (faster than hearts).
+    // Core travelers run LONG (guaranteed past the no-grow zone) so the core
+    // seeds distant clusters — this is the threat that keeps spreading.
+    c.tendrilAcc=(c.tendrilAcc==null?4:c.tendrilAcc)-ddt;
+    if(c.tendrilAcc<=0){
+      c.tendrilAcc=Math.max(4, 10-threatTime*0.012-wave*0.3);
+      const farLen=520+Math.random()*380+Math.min(300,threatTime*0.25);
+      heartTendril(c, farLen);
+      if(Math.random()<0.45) heartTendril(c, farLen);
+    }
+    // ROOTS: the visible crown around the core is real. Short travelers on
+    // fixed slots push living voxels just past the colony, then settle into
+    // dormant threads — shootable, stallable, severable, like any tendril.
+    // One root per slot, ever: settled roots hold their slot, severed slots
+    // stay cleared. Purging the crown is permanent progress.
+    c.rootAcc=(c.rootAcc==null?1:c.rootAcc)-ddt;
+    if(c.rootAcc<=0){
+      c.rootAcc=2.2;
+      c.rootSlot=((c.rootSlot||0)+1)%8;
+      const slotTaken=tendrils.some(o=>o.root&&o.core===c&&o.slot===c.rootSlot);
+      let liveRoots=0;
+      for(const t of tendrils) if(t.root && !t.done) liveRoots++;
+      if(!slotTaken && liveRoots<8) heartTendril(c, 150, c.seed+c.rootSlot*Math.PI*2/8, {slot:c.rootSlot, core:c});
+    }
+  }
+  updateMerge(ddt);
+}
 function spawnPod(){
   const keys=[...mycCells.keys()];
   if(!keys.length) return;
@@ -1078,6 +1313,7 @@ function entityAtWorld(x,y,r){
   for(const p of pods){ if(Math.hypot(p.x-x,p.y-y) < r+p.r) return p; }
   for(const c of clusters){ if(Math.hypot(c.x-x,c.y-y) < r+c.r) return c; }
   for(const h of hearts){ if(Math.hypot(h.x-x,h.y-y) < r+h.r) return h; }
+  for(const c of cores){ if(Math.hypot(c.x-x,c.y-y) < r+c.r) return c; }
   return null;
 }
 function damageEntitiesAt(wx,wy,dmg,radius,opts){
@@ -1124,12 +1360,36 @@ function damageEntitiesAt(wx,wy,dmg,radius,opts){
       addParticles(h.x,h.y,40,'#fb7185',170); SFX.kill(); shake=Math.min(7,shake+4);
       logEvent(`<b>♥ ${h.primary?'PRIMARY ':''}HEART SLAIN!</b> ${hearts.length} remaining. (+${25+pb} purge)`, 'good');
       checkMilestones();
-      if(hearts.length===1 && !finalPush){ finalPush=true; logEvent('<b>The last heart screams.</b> The cloud surges!', 'surge'); SFX.sting(); }
-      if(hearts.length===0){
+      if(hearts.length===1 && !finalPush && cores.length===0){ finalPush=true; logEvent('<b>The last heart screams.</b> The cloud surges!', 'surge'); SFX.sting(); }
+      if(hearts.length===0 && cores.length===0){
         // Continuous expedition: no finish screen, no mandatory choice.
         // The quiet is the reward — and the warning.
         bloomRepose(); return true;
       }
+    }
+  }
+  for(let i=cores.length-1;i>=0;i--){
+    const c=cores[i];
+    if(Math.hypot(c.x-wx,c.y-wy) > radius+c.r) continue;
+    // COLONY SHIELD: dense growth around the core absorbs fire. Clear the
+    // colony to expose the core — minimum 20% damage always gets through.
+    const shield=countVoxelsNear(c.x,c.y,110);
+    const scale=1-0.8*Math.min(1,shield/48);
+    const dealt=Math.floor(dmg*scale);
+    hit=true; c.hp-=dealt; c.flash=0.12; totalDamage+=dealt;
+    if(dealt<dmg*0.9 && Math.random()<0.15) addNum(c.x,c.y-c.r-12,'SHIELDED','#c084fc');
+    if(c.hp<0) overkill+=-c.hp;
+    addParticles(c.x,c.y,4,opts.color||'#881337',60);
+    if(c.hp<=0){
+      cores.splice(i,1); kills++; bossesKilled++; sysHeartsSlain++;
+      purgeTotal+=60;
+      coins+=120; addNum(c.x,c.y-20,'CORE DESTROYED +120g','#e9d5ff');
+      addParticles(c.x,c.y,70,'#881337',220); addParticles(c.x,c.y,40,'#e9d5ff',180);
+      SFX.boom(); shake=Math.min(9,shake+5);
+      logEvent('<b>◉ BLOOM CORE DESTROYED.</b> The source is gone — but every voxel, thread and cluster it made REMAINS. Reclaim the ground.', 'good');
+      toast('◉ CORE DOWN — RECLAIM THE GROUND', 'good');
+      checkMilestones();
+      if(hearts.length===0 && cores.length===0){ bloomRepose(); return true; }
     }
   }
   return hit;
@@ -1521,6 +1781,121 @@ function updatePurge(ddt){
     purgeFx.t+=ddt;
     if(purgeFx.t>=purgeFx.dur) purgeFx=null;
   }
+  if(strikeCd>0) strikeCd-=ddt;
+}
+// ===== STRIKE WING — the station's other emergency arm. Not a pulse but
+// physical spacecraft: a disposable 4-craft fleet you fly at the map to carve
+// a path through Bloom territory. 1 HP each — the cloud eats them. Survivors
+// strafe the target, then they're gone. Expensive, fragile, manual.
+const STRIKE_COST=260, STRIKE_CD=75, STRIKE_SHIPS=4, STRIKE_DMG=25, STRIKE_LIFE=14, STRIKE_SPEED=340;
+let strikers=[]; // {x,y,tx,ty,speed,hp,fireCd,life,seed,orbit}
+let strikeCd=0, strikeArming=false;
+function strikeUnlocked(){
+  // later than purge: a real operation with crews to spare
+  if(!purgeUnlocked()) return false;
+  if(asteroids.filter(a=>a.unlocked).length<4) return false;
+  if(hangarLevels()<2) return false;
+  if((stationTech.command||0)<1) return false;
+  if(towers.filter(t=>!t.isModule).length<4) return false;
+  return true;
+}
+function strikeLockReason(){
+  if(!purgeUnlocked()) return 'bring CORE PURGE online first';
+  if(asteroids.filter(a=>a.unlocked).length<4) return `link ${4-asteroids.filter(a=>a.unlocked).length} more trade lane(s)`;
+  if(hangarLevels()<2) return 'grow Hangar to Lv2 total';
+  if((stationTech.command||0)<1) return 'build Command Center (click station)';
+  if(towers.filter(t=>!t.isModule).length<4) return 'deploy more weapons';
+  return '';
+}
+function strikeReady(){ return strikeUnlocked() && !strikeArming && strikeCd<=0 && state===STATE.PLAYING && defenseEstablished; }
+function armStrike(){
+  if(state!==STATE.PLAYING) return;
+  if(strikeArming){ strikeArming=false; toast('STRIKE WING stood down', 'hint'); return; }
+  if(!strikeUnlocked()){ SFX.no(); flashHint('STRIKE WING offline — '+strikeLockReason()+'.'); return; }
+  if(strikeCd>0 || !defenseEstablished){ SFX.no(); return; }
+  if(coins<STRIKE_COST){ SFX.no(); flashHint(`Strike Wing needs ${STRIKE_COST}g — hold the lanes a little longer.`); return; }
+  strikeArming=true; placeType=null; ghostPos=null; selectedTower=null; hidePanel();
+  SFX.place();
+  toast('STRIKE WING ARMED — click the map to commit (right-click/X cancels)', 'surge');
+  logEvent('<b>Strike Wing armed.</b> Pick where the fleet goes.', 'surge');
+}
+function commitStrike(x,y){
+  if(!strikeArming) return;
+  if(!strikeUnlocked() || strikeCd>0){ SFX.no(); strikeArming=false; return; }
+  if(coins<STRIKE_COST){ SFX.no(); flashHint(`Strike Wing needs ${STRIKE_COST}g.`); strikeArming=false; return; }
+  coins-=STRIKE_COST; strikeCd=STRIKE_CD; strikeArming=false;
+  for(let k=0;k<STRIKE_SHIPS;k++){
+    const back=k*0.35;
+    strikers.push({x:CORE.x+(Math.random()-0.5)*20, y:CORE.y+(Math.random()-0.5)*20,
+      tx:x+(Math.random()-0.5)*50, ty:y+(Math.random()-0.5)*50,
+      speed:STRIKE_SPEED, hp:1, fireCd:0.3+k*0.15, life:STRIKE_LIFE+back,
+      seed:Math.random()*6.28, orbit:Math.random()*6.28});
+    addParticles(CORE.x,CORE.y,6,'#7dd3fc',120);
+  }
+  SFX.wave(); shake=Math.min(6,shake+2);
+  logEvent(`<b>Strike Wing away — ${STRIKE_SHIPS} craft.</b> They will not all come back.`, 'surge');
+  toast('STRIKE WING AWAY', 'good');
+  updateBuildBar();
+}
+function updateStrikers(ddt){
+  for(let i=strikers.length-1;i>=0;i--){
+    const s=strikers[i];
+    s.life-=ddt;
+    if(s.life<=0){
+      addParticles(s.x,s.y,6,'#7dd3fc',60);
+      strikers.splice(i,1);
+      continue;
+    }
+    const dx=s.tx-s.x, dy=s.ty-s.y, dist=Math.hypot(dx,dy)||1;
+    if(dist<70){
+      // on station over target: strafe orbit, guns hot
+      s.orbit+=2.2*ddt;
+      const ox=s.tx+Math.cos(s.orbit)*44, oy=s.ty+Math.sin(s.orbit)*44;
+      const ox2=ox-s.x, oy2=oy-s.y, ol=Math.hypot(ox2,oy2)||1;
+      s.x+=(ox2/ol)*s.speed*0.8*ddt; s.y+=(oy2/ol)*s.speed*0.8*ddt;
+    } else {
+      s.x+=(dx/dist)*s.speed*ddt; s.y+=(dy/dist)*s.speed*ddt;
+      // en-route volley: every craft fires piercing slugs straight down the
+      // attack lane — this is how the wing pierces into ground your towers
+      // cannot reach. No bounty: the path is the reward.
+      s.volleyCd=(s.volleyCd||0)-ddt;
+      if(s.volleyCd<=0){
+        s.volleyCd=0.5;
+        const spd=750;
+        projectiles.push({x:s.x, y:s.y,
+          vx:(dx/dist)*spd, vy:(dy/dist)*spd,
+          r:3.5, dmg:18, tower:null, life:1.4, trail:[],
+          slow:0, slowDur:0, splash:0, chain:0, color:'#7dd3fc',
+          pierce:3, hitSet:new Set(), striker:true});
+        addParticles(s.x,s.y,2,'#7dd3fc',40);
+      }
+    }
+    // 1 HP: touching the living cloud kills outright
+    if(myceliumAtWorld(s.x,s.y,6)){
+      addParticles(s.x,s.y,10,'#f87171',90);
+      addNum(s.x,s.y-10,'WING DOWN','#f87171');
+      strikers.splice(i,1);
+      continue;
+    }
+    // guns: carve voxels, wound entities, snap tendril tips — no bounty
+    // (player weapons don't mint gold; the path is the reward)
+    s.fireCd-=ddt;
+    if(s.fireCd<=0){
+      s.fireCd=0.55;
+      const hitC=myceliumAtWorld(s.x,s.y,60);
+      const hitE=entityAtWorld(s.x,s.y,60);
+      const hitT=tendrilTipAt(s.x,s.y,60);
+      if(hitC||hitE||hitT){
+        damageMyceliumAt(s.x,s.y,STRIKE_DMG,42,{coinPerCell:0,color:'#7dd3fc'});
+        if(state!==STATE.PLAYING) return;
+        damageEntitiesAt(s.x,s.y,STRIKE_DMG,42,{color:'#7dd3fc'});
+        if(state!==STATE.PLAYING) return;
+        damageTendrilsAt(s.x,s.y,STRIKE_DMG,42);
+        addParticles(s.x,s.y,4,'#7dd3fc',70);
+        if(Math.random()<0.3) SFX.shoot();
+      }
+    }
+  }
 }
 function fmtTime(s){ s=Math.max(0,Math.floor(s)); return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`; }
 function fillEndScreen(){
@@ -1573,16 +1948,19 @@ function resetRun(){
   defenseEstablished=false;
   purgeTotal=0; purgeGoal=1200; mycGrowthAcc=0; mycTouchAcc=0; mycTime=0; driftTime=0; corruptAcc=0;
   endless=false; endlessCycle=0;
-  hearts=[]; pods=[]; clusters=[]; tendrils=[]; podTimer=10; mile25=mile50=mile75=false; oohShown=false;
+  hearts=[]; pods=[]; clusters=[]; cores=[]; tendrils=[]; podTimer=10; mile25=mile50=mile75=false; oohShown=false;
+  bloomLedger=new Map(); ledgerMaterialize.acc=0;
   sysHeartsTotal=0; sysHeartsSlain=0; finalPush=false;
+  budAcc=25;
+  merging=null; mergeSig=''; mergeHold=0; mergeAcc=0;
   bloomCalm=0; nextBloomIn=0; bloomWhispered=false; bloomCycles=0;
   purgeCd=0; purgeCharging=0; purgeFx=null;
+  strikers=[]; strikeCd=0; strikeArming=false;
   sysMods={ore:1, growth:1, hearts:0, derelicts:0, reward:1}; sysNameCur='Home'; pendingSys=null;
   stationTech={solar:0, lab:0, command:0, nav:0}; solarAcc=0; selectedStation=false;
   tremorTimer=22; tremorIdx=0; seenHeart=false; seenCloud=false;
   sightCheckAcc=0; sightingFlash=0; wakeFlash=0;
-  centerCam();
-  cam.zoom=1.7; clampCam(); // intimate opening: station + drones + home waters only
+  centerOnStation(1.7); // intimate opening, dead-centered: station + drones + home waters
   seedDriftMotes();
   dps=0; peakDps=0; dpsTimer=0; dpsLast=0; totalDamage=0; overkill=0; mycHintShown=false;
   setTimeout(()=>{
@@ -1656,9 +2034,13 @@ function doWarp(force){
   const scoutTargets = scouts.map(s=>({sc:s, index:s.target ? asteroids.indexOf(s.target) : -1}));
   asteroids=[]; myceliumBlocks=[];
   preferredAsteroid=null;
-  hearts=[]; pods=[]; clusters=[]; tendrils=[]; podTimer=10;
+  hearts=[]; pods=[]; clusters=[]; cores=[]; tendrils=[]; podTimer=10;
+  bloomLedger=new Map(); ledgerMaterialize.acc=0;
   seenHeart=false;
   sysHeartsTotal=0; sysHeartsSlain=0; finalPush=false; // fresh liberation ledger
+  budAcc=25;
+  merging=null; mergeSig=''; mergeHold=0; mergeAcc=0;
+  strikers=[]; strikeCd=0; strikeArming=false; // transient wing never survives warp
   bloomCalm=0; nextBloomIn=0; bloomWhispered=false; bloomCycles=0;
   star=null; planets=[]; beltRocks=[];
   purgeGoal=Math.floor(purgeGoal*1.35);
@@ -1741,7 +2123,7 @@ function queueWave(){
   // CLOUD SURGE: instead of spawning walker enemies, the voxel cloud lunges inward.
   spawnQueue=[];
   const isSurge = wave%10===0;
-  const burst = Math.round(((isSurge ? 60+wave*3 : 14+Math.floor(wave*1.6)+Math.floor(threatTime/25)))*(sysMods.growth||1));
+  const burst = Math.round(((isSurge ? 60+wave*3 : 14+Math.floor(wave*1.6)+Math.floor(threatTime/25)))*(sysMods.growth||1)*(1+0.25*corePressure()));
   mycSurge(burst);
   if(isSurge){
     showWaveBanner();
@@ -1766,7 +2148,7 @@ function myceliumGrowStep(ddt){
   const now=performance.now()*0.001;
   // ramp: slow creep at first (~0.85s), full pressure once established
   const ramp=Math.min(1, 0.35+threatTime/75);
-  const interval=Math.max(0.10, (0.85 - threatTime*0.0022 - wave*0.012 - galaxy*0.02)/(sysMods.growth||1));
+  const interval=Math.max(0.10, (0.85 - threatTime*0.0022 - wave*0.012 - galaxy*0.02)/((sysMods.growth||1)*(1+0.35*corePressure())));
   mycGrowthAcc+=ddt*ramp;
   // age + flash decay
   if(mycCells.size>0 && Math.random()<0.3){
@@ -1812,16 +2194,19 @@ function myceliumGrowStep(ddt){
       const hc=mycWorldToCell(h.x,h.y);
       for(let k=0;k<2;k++) infectCell(hc.cx+Math.floor(Math.random()*7)-3, hc.cy+Math.floor(Math.random()*7)-3);
     }
-    // tendril rhythm quickens as internal pressure rises — never a "wave"
+    // tendril rhythm quickens as internal pressure rises — never a "wave".
+    // A living core quickens every heart with it.
     h.tendrilAcc=(h.tendrilAcc==null?14:h.tendrilAcc)-ddt;
     if(h.tendrilAcc<=0){
-      h.tendrilAcc=Math.max(9, 26-threatTime*0.02-wave*0.6);
+      h.tendrilAcc=Math.max(7, 26-threatTime*0.02-wave*0.6-corePressure()*2);
       heartTendril(h);
     }
     if(h.flash>0) h.flash-=ddt;
   }
   updateClusters(ddt);
+  updateCores(ddt);
   updateTendrils(ddt);
+  ledgerMaterialize(ddt);
   updateBloomCycle(ddt);
   for(const p of pods){
     p.emitAcc=(p.emitAcc||0)+ddt;
@@ -1835,7 +2220,7 @@ function myceliumGrowStep(ddt){
   podTimer-=ddt;
   if(podTimer<=0){
     podTimer=16+Math.random()*8;
-    if(pods.length<2+Math.floor(wave/8)) spawnPod();
+    if(pods.length<2+Math.floor(wave/8)+corePressure()) spawnPod();
   }
   // M4: corrupted worlds simmer, overrun worlds feed the cloud — purge the
   // voxels off them to step the infection back down. Modest rates: overrun
@@ -1996,7 +2381,8 @@ canvas.addEventListener('mousemove', e=>{
       const ent=entityAtWorld(wm.x,wm.y,10);
       if(ent){
         const isH=hearts.includes(ent);
-        tip=isH?`<b>♥ Mycelium heart</b><br><small>HP ${Math.max(0,Math.ceil(ent.hp))}/${ent.maxHp} • slay it!</small>`:`<b>Spore pod</b><br><small>HP ${Math.max(0,Math.ceil(ent.hp))}/${ent.maxHp} • pop it!</small>`;
+        const isC=cores.includes(ent);
+        tip=isC?`<b>◉ Bloom Core</b><br><small>HP ${Math.max(0,Math.ceil(ent.hp))}/${ent.maxHp} • clear its colony first!</small>`:isH?`<b>♥ Mycelium heart</b><br><small>HP ${Math.max(0,Math.ceil(ent.hp))}/${ent.maxHp} • slay it!</small>`:`<b>Spore pod</b><br><small>HP ${Math.max(0,Math.ceil(ent.hp))}/${ent.maxHp} • pop it!</small>`;
         tx=ent.x; ty=ent.y-ent.r-12;
       } else {
         const cell=myceliumAtWorld(wm.x,wm.y,10);
@@ -2010,7 +2396,7 @@ canvas.addEventListener('mousemove', e=>{
     else tooltip.classList.add('hidden');
   } else if(tooltip) tooltip.classList.add('hidden');
 });
-canvas.addEventListener('contextmenu', e=>{ e.preventDefault(); if(suppressContext){ suppressContext=false; return; } if(placeType){ placeType=null; ghostPos=null; updateBuildBar(); } else { selectedTower=null; hidePanel(); } });
+canvas.addEventListener('contextmenu', e=>{ e.preventDefault(); if(suppressContext){ suppressContext=false; return; } if(placeType){ placeType=null; ghostPos=null; updateBuildBar(); } else if(strikeArming){ strikeArming=false; toast('STRIKE WING stood down', 'hint'); updateBuildBar(); } else { selectedTower=null; hidePanel(); } });
 function handleWorldClick(sx,sy){
   if(state!==STATE.PLAYING) return;
   const w=screenToWorld(sx,sy), x=w.x, y=w.y;
@@ -2021,6 +2407,11 @@ function handleWorldClick(sx,sy){
       return;
     }
     tryPlace(x,y);
+    return;
+  }
+  if(strikeArming){
+    // manual strike: the click IS the order — fleet flies at this point
+    commitStrike(x,y);
     return;
   }
   // celestial bodies first: planets ARE their resources — clicking a world
@@ -2352,6 +2743,7 @@ function updateBuildBar(){
       else {
         if(coins < d.cost && !b.classList.contains('selected')){ SFX.no(); return; }
         placeType=d.id; { const wpt=screenToWorld(mouse.x,mouse.y); ghostPos={x:wpt.x,y:wpt.y}; }
+        if(strikeArming) strikeArming=false;
         selectedTower=null; hidePanel();
         toast(`Placing ${d.name} — CLICK a glowing ring (Station or linked world). Right-click cancels.`, 'info');
         ensureAudio();
@@ -2746,8 +3138,10 @@ addEventListener('keydown', e=>{
   keys[k]=true;
   if((e.ctrlKey || e.metaKey) && k==='z' && state===STATE.PLAYING){ e.preventDefault(); doUndo(); return; }
   if(k===' ' && state===STATE.PLAYING){ e.preventDefault(); buyCorePurge(); }
+  if(k==='x' && state===STATE.PLAYING){ e.preventDefault(); ensureAudio(); armStrike(); updateBuildBar(); }
   if(k==='escape'){
     if(placeType){ placeType=null; ghostPos=null; updateBuildBar(); }
+    else if(strikeArming){ strikeArming=false; toast('STRIKE WING stood down', 'hint'); updateBuildBar(); }
     else if(selectedTower||selectedStation){ selectedTower=null; hidePanel(); }
     else if(state===STATE.PLAYING) setState(STATE.PAUSED);
     else if(state===STATE.PAUSED) setState(STATE.PLAYING);
@@ -2769,6 +3163,7 @@ addEventListener('keydown', e=>{
       if(placeType===def.id){ placeType=null; ghostPos=null; }
       else {
         placeType=def.id; { const wpt=screenToWorld(mouse.x,mouse.y); ghostPos={x:wpt.x,y:wpt.y}; }
+        if(strikeArming) strikeArming=false; // tower tools stand the wing down
         selectedTower=null; hidePanel();
         toast(`Placing ${def.name} — CLICK a glowing ring (Station or linked world). Right-click cancels.`, 'info');
       }
@@ -2801,6 +3196,11 @@ function findCloudTarget(tx,ty,range){
   for(const h of hearts){
     const d=Math.hypot(h.x-tx,h.y-ty);
     if(d<=range && d-120<entD){ entD=d-120; ent={heart:h,x:h.x,y:h.y}; }
+  }
+  for(const c of cores){
+    // siege priority: the biggest organ pulls hardest once seen
+    const d=Math.hypot(c.x-tx,c.y-ty);
+    if(d<=range && d-160<entD){ entD=d-160; ent={core:c,x:c.x,y:c.y}; }
   }
   for(const t of tendrils){
     // growing tips draw fire too — a stalled tip is a dead tendril
@@ -3031,6 +3431,8 @@ function update(dt){
   myceliumGrowStep(ddt);
   if(state!==STATE.PLAYING) return; // die() may have fired inside growth
   updatePurge(ddt);
+  updateStrikers(ddt);
+  if(state!==STATE.PLAYING) return;
   enemies.length=0; waveSpawning=false;
   // drift motes (pre-defense spores on the wind) + first-sighting checks
   if(sightingFlash>0) sightingFlash-=ddt;
@@ -3258,7 +3660,7 @@ function update(dt){
       const labCount=stationTech.lab;
       if(labCount>0 && p.pierce) dmg=Math.floor(dmg*(1+labCount*0.12));
       const radius=p.splash||26;
-      const cleared=damageMyceliumAt(p.x,p.y,dmg,radius,{slowDur:p.slow?p.slowDur:0,color:p.color});
+      const cleared=damageMyceliumAt(p.x,p.y,dmg,radius,{slowDur:p.slow?p.slowDur:0,color:p.color,coinPerCell:p.striker?0:undefined});
       if(state!==STATE.PLAYING) return; // winFreed() may have fired
       damageEntitiesAt(p.x,p.y,dmg,radius,{color:p.color});
       if(state!==STATE.PLAYING) return; // heart slain may have freed the galaxy
@@ -3344,6 +3746,7 @@ function getObjective(){
   if(linked<4) return {step:5, text:'Choose your frontier', detail:'Moons: safe+fast • Belts: rich • Derelicts: tech • Infected: hazard pay'};
   const unS=asteroids.filter(a=>!a.surveyed).length;
   if(unS>0) return {step:6, text:'Chart unknown worlds', detail:`${unS} ? signatures left — scouts earn 8g each`};
+  if(cores.length) return {step:7, text:'Siege the Bloom Core', detail:`◉ ${cores.length} core(s) • clear its colony first • territory stays`};
   return {step:7, text:'Hold against the hearts', detail:`${hearts.length} ♥ pulsing • growth ${myceliumMass()} • click Station for tech`};
 }
 
@@ -3368,7 +3771,7 @@ function updateUI(){
   const coinsEl=document.getElementById('coins');
   if(coinsEl) coinsEl.innerHTML='<span class="coin"></span> '+coins+'g';
   const heartsEl=document.getElementById('heartsLeft');
-  if(heartsEl) heartsEl.textContent=hearts.length;
+  if(heartsEl) heartsEl.textContent=hearts.length+cores.length;
   const wt=document.getElementById('waveTimer');
   if(wt){
     // Diegetic status only: what the crew can SEE. No wave numbers, no timers.
@@ -3409,6 +3812,30 @@ function updateUI(){
     }
     purgeDial.title=`CORE PURGE — ${PURGE_COST}g, ${PURGE_CD}s cooldown. Damages nearby Bloom, never the whole organism. (Space)`;
   }
+  const strikeDial=document.getElementById('strikeDial');
+  const strikeTxt=document.getElementById('strikeDialTxt');
+  const strikeHint=document.getElementById('strikeHint');
+  if(strikeDial){
+    const sunlocked=strikeUnlocked();
+    const sready=strikeReady() && coins>=STRIKE_COST;
+    strikeDial.classList.toggle('ready',sunlocked&&!strikeArming&&strikeCd<=0&&coins>=STRIKE_COST);
+    strikeDial.classList.toggle('arming',strikeArming);
+    strikeDial.classList.toggle('locked',!sunlocked||!sready);
+    if(strikeTxt){
+      if(strikeArming) strikeTxt.textContent='AIM';
+      else if(!sunlocked) strikeTxt.textContent='—';
+      else if(strikeCd>0) strikeTxt.textContent=`${Math.ceil(strikeCd)}s`;
+      else strikeTxt.textContent=`${STRIKE_COST}g`;
+    }
+    if(strikeHint){
+      if(strikeArming) strikeHint.innerHTML='<b>CLICK MAP</b> to commit';
+      else if(!sunlocked) strikeHint.textContent=`STRIKE WING // offline — ${strikeLockReason()}`;
+      else if(strikeCd>0) strikeHint.textContent=`STRIKE WING // refitting… ${Math.ceil(strikeCd)}s`;
+      else if(coins<STRIKE_COST) strikeHint.innerHTML=`STRIKE WING // ready — needs <b>${STRIKE_COST}g</b>`;
+      else strikeHint.innerHTML='STRIKE WING // <b>READY</b> — X';
+    }
+    strikeDial.title=`STRIKE WING — ${STRIKE_COST}g, ${STRIKE_CD}s refit. ${STRIKE_SHIPS} fragile craft carve a path where you point them. (X)`;
+  }
   const wp=document.getElementById('wavePreviewText');
   const wavePreview=document.getElementById('wavePreview');
   if(wavePreview) wavePreview.classList.toggle('early-hidden', !defenseEstablished);
@@ -3418,7 +3845,8 @@ function updateUI(){
     // Organism language: quiet / creeping / surging. Never "wave N".
     // The zoom layer reads as discovery: STATION → LOCAL → PLANETARY → SYSTEM → DEEP.
     const zl = cam.zoom>=1.5?'STATION':cam.zoom>=1.0?'LOCAL':cam.zoom>=0.65?'PLANETARY':cam.zoom>=0.4?'SYSTEM':'DEEP';
-    wp.textContent=`${zl} • ${wave%10===0?'BLOOM SURGING':defenseEstablished?'BLOOM CREEPING':'SYSTEM QUIET'} • ♥ ${hearts.length} • CLOUD ${myceliumMass()}`;
+    const bloomMood = cores.length?`◉ CORE ×${cores.length} — BLOOM QUICKENING`:(wave%10===0?'BLOOM SURGING':defenseEstablished?'BLOOM CREEPING':'SYSTEM QUIET');
+    wp.textContent=`${zl} • ${bloomMood} • ♥ ${hearts.length+cores.length} • CLOUD ${myceliumMass()}`;
   }
   const dpsEl=document.getElementById('statDps');
   if(dpsEl) dpsEl.textContent=Math.round(dps);
@@ -3755,6 +4183,19 @@ function render(){
   }
   // ===== VOXEL MYCELIUM CLOUD (under everything except sky) =====
   if(threatActive){
+    // distant-ledger haze: aggregate pressure reads as faint organic mass at
+    // far zoom (the capped Bloom, still growing). Near zoom shows only real
+    // voxels — no double vision.
+    if(cam.zoom<0.85 && bloomLedger.size){
+      for(const e of bloomLedger.values()){
+        if(e.pressure<8) continue;
+        const a=Math.min(0.22,0.06+e.pressure*0.0025)*(0.7+0.3*Math.sin(nowS*1.3+e.lx+e.ly));
+        ctx.globalAlpha=Math.max(0,a);
+        px(e.lx*LEDGER_PX,e.ly*LEDGER_PX,LEDGER_PX,LEDGER_PX,'#4c1d95');
+        px(e.lx*LEDGER_PX+LEDGER_PX/4,e.ly*LEDGER_PX+LEDGER_PX/4,LEDGER_PX/2,LEDGER_PX/2,'#6d28d9');
+        ctx.globalAlpha=1;
+      }
+    }
     // LOD: far zoom aggregates — body + outline only, no veins/shading/strips.
     // Viewport cull: off-screen voxels cost nothing (matters now mass persists).
     const voxFar=cam.zoom<0.5;
@@ -3880,6 +4321,8 @@ function render(){
       const hx=snap(h.x), hy=snap(h.y);
       const beat=Math.sin(nowS*2.4+h.seed)>0?4:0;
       const S=(h.primary?52:44)+beat;
+      // merge sync: grouped hearts beat TOGETHER — the tell before a core
+      const sync=h.mergeSync&&Math.sin(nowS*6)>0;
       // tendrils: branching arms rooted in the core (LOD-gated)
       if(cam.zoom>=0.55){
         for(let ta=0;ta<5;ta++){
@@ -3901,8 +4344,8 @@ function render(){
         const oa=nowS*0.9+h.seed+o*Math.PI/3;
         px(hx+Math.cos(oa)*(30+beat)-2,hy+Math.sin(oa)*(30+beat)-2,4,4,'#f0abfc');
       }
-      px(hx-S/2-4,hy-S/2-4,S+8,S+8,'rgba(251,113,133,0.18)');
-      pxBox(hx-S/2,hy-S/2,S,S,h.flash>0?'#ffffff':'#7f1d1d','#020617');
+      px(hx-S/2-4,hy-S/2-4,S+8,S+8,sync?'rgba(240,171,252,0.35)':'rgba(251,113,133,0.18)');
+      pxBox(hx-S/2,hy-S/2,S,S,(h.flash>0||sync)?'#ffffff':'#7f1d1d','#020617');
       px(hx-S/2+5,hy-S/2+5,S-10,S-10,'#dc2626');
       px(hx-11,hy-13,22,18,'#f0abfc'); // bright core
       px(hx-11,hy-13,22,4,'#ffffff');
@@ -3912,6 +4355,64 @@ function render(){
       px(hx-23,hy+S/2+7,46*hf,4,hf>0.5?'#fb7185':'#ef4444');
       ctx.fillStyle='#fecdd3'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
       ctx.fillText(h.primary?`♥ PRIMARY ${Math.ceil(Math.max(0,h.hp))}`:`♥ HEART ${Math.ceil(Math.max(0,h.hp))}`,hx,hy-S/2-10);
+    }
+    // merge in progress: converging ring at the centroid — break it apart NOW
+    if(merging && threatActive){
+      const mrg=merging, f=1-mrg.t/CORE_MERGE_DUR;
+      const rr=120*f+30;
+      ctx.globalAlpha=0.5+0.3*Math.sin(nowS*8);
+      for(let a=0;a<40;a++){
+        const aa=a/40*Math.PI*2;
+        px(mrg.x+Math.cos(aa)*rr-2,mrg.y+Math.sin(aa)*rr-2,4,4,'#f0abfc');
+      }
+      ctx.globalAlpha=1;
+      ctx.fillStyle='#fecdd3'; ctx.font='bold 11px monospace'; ctx.textAlign='center';
+      ctx.fillText('♥♥♥ MERGING',snap(mrg.x),snap(mrg.y)-70);
+    }
+    // BLOOM CORES: siege organs inside regenerating colonies. Bigger mass,
+    // triple pulse rings, eight arms — mechanically distinct, not a big heart.
+    for(const c of cores){
+      const hx=snap(c.x), hy=snap(c.y);
+      const beat=Math.sin(nowS*2.0+c.seed)>0?6:0;
+      const S=92+beat;
+      if(cam.zoom>=0.55){
+        for(let ta=0;ta<8;ta++){
+          const tang=c.seed+ta*Math.PI*2/8+Math.sin(nowS*0.6+c.seed+ta)*0.12;
+          let tx2=hx, ty2=hy;
+          const segs=4+(ta%2);
+          for(let sg=1;sg<=segs;sg++){
+            const sl2=(S/2+8)+sg*12;
+            tx2=hx+Math.cos(tang)*sl2+Math.sin(nowS*1.0+ta*2+sg)*5;
+            ty2=hy+Math.sin(tang)*sl2+Math.cos(nowS*0.8+ta+sg*1.3)*5;
+            px(tx2-3,ty2-3,7,7,sg%2?'#5b21b6':'#4c1d95');
+            px(tx2-2,ty2-2,3,3,'#c084fc');
+          }
+          px(tx2-2,ty2-2,5,5,'#f0abfc'); // spore tip
+        }
+      }
+      for(let o=0;o<9;o++){
+        const oa=-nowS*0.7+c.seed+o*Math.PI*2/9;
+        px(hx+Math.cos(oa)*(52+beat)-2,hy+Math.sin(oa)*(52+beat)-2,4,4,'#e9d5ff');
+      }
+      // triple pulse rings: the siege read at any zoom
+      for(let rr2=0;rr2<3;rr2++){
+        const pr2=S/2+14+((nowS*36+rr2*22)%66);
+        ctx.globalAlpha=0.35-rr2*0.09;
+        px(hx-pr2,hy-2,pr2*2,3,'#c084fc'); px(hx-2,hy-pr2,3,pr2*2,'#c084fc');
+        ctx.globalAlpha=1;
+      }
+      px(hx-S/2-6,hy-S/2-6,S+12,S+12,'rgba(136,19,55,0.30)');
+      pxBox(hx-S/2,hy-S/2,S,S,c.flash>0?'#ffffff':'#4c0519','#020617');
+      px(hx-S/2+8,hy-S/2+8,S-16,S-16,'#881337');
+      px(hx-S/2+8,hy-S/2+8,S-16,6,'rgba(255,255,255,0.25)');
+      px(hx-16,hy-18,32,26,'#e9d5ff'); // bright fused core
+      px(hx-16,hy-18,32,5,'#ffffff');
+      px(hx-6,hy-9,12,12,c.flash>0?'#ffffff':'#3b0764'); // deep nucleus
+      const cf=Math.max(0,c.hp/c.maxHp);
+      px(hx-34,hy+S/2+8,68,7,'#020617');
+      px(hx-33,hy+S/2+9,66*cf,5,cf>0.5?'#c084fc':'#ef4444');
+      ctx.fillStyle='#fecdd3'; ctx.font='bold 12px monospace'; ctx.textAlign='center';
+      ctx.fillText(`◉ CORE ${Math.ceil(Math.max(0,c.hp))}`,hx,hy-S/2-12);
     }
   }
   // PIXEL trade lanes: physical logistics routes. Base dots mark the path;
@@ -4247,8 +4748,7 @@ function render(){
     }
   }
   // PIXEL drones: 11x7 chunky haulers with nav lights + mining rig
-  for(const d of drones){
-    if(d.flash>0) d.flash-=0.016;
+  for(const d of drones){    if(d.flash>0) d.flash-=0.016;
     const dx=snap(d.x), dy=snap(d.y);
     px(dx-5,dy+6,10,3,'rgba(0,0,0,0.3)');
     const body=d.flash>0?'#ffffff':(d.carrying?'#facc15':'#94a3b8');
@@ -4299,6 +4799,40 @@ function render(){
       px(sx-9,sy-13,18,3,'#020617');
       px(sx-8,sy-12,16*fill,1,'#67e8f9');
     }
+  }
+  // STRIKE WING fleet: tiny physical spacecraft, thrust + blink + guns
+  for(const s of strikers){
+    const sx=snap(s.x), sy=snap(s.y);
+    const ang=Math.atan2(s.ty-s.y,s.tx-s.x);
+    const fx=Math.cos(ang), fy=Math.sin(ang);
+    if(Math.sin(nowS*30+s.seed*7)>0) px(sx-fx*8-1,sy-fy*8-1,3,2,'#fb923c'); // thrust
+    px(sx-4,sy-3,8,6,'#0c2740');
+    px(sx-4,sy-3,8,2,'#7dd3fc');
+    px(sx+1,sy-1,3,3,'#e0f2fe'); // cockpit
+    if(Math.sin(nowS*9+s.seed*3)>0) px(sx-5,sy-1,2,2,'#f87171'); // nav blink
+    // life bar: these craft are borrowed time
+    const lf=Math.max(0,s.life/STRIKE_LIFE);
+    px(sx-6,sy-9,12,2,'#020617');
+    px(sx-5,sy-8,10*lf,1,lf>0.4?'#7dd3fc':'#f87171');
+  }
+  // strike targeting: reticle + dashed route from the station
+  if(strikeArming && ghostPos && (state===STATE.PLAYING||state===STATE.PAUSED)){
+    const gx=ghostPos.x, gy=ghostPos.y;
+    const pr=26+Math.sin(nowS*6)*3;
+    ctx.fillStyle='rgba(125,211,252,0.85)';
+    ctx.fillRect(snap(gx-pr),snap(gy)-1,10,2); ctx.fillRect(snap(gx+pr)-10,snap(gy)-1,10,2);
+    ctx.fillRect(snap(gx)-1,snap(gy-pr),2,10); ctx.fillRect(snap(gx)-1,snap(gy+pr)-10,2,10);
+    px(gx-2,gy-2,4,4,'#fef9c3');
+    const dx=gx-CORE.x, dy=gy-CORE.y, dl=Math.hypot(dx,dy)||1;
+    const steps=Math.floor(dl/26);
+    ctx.globalAlpha=0.5;
+    for(let s2=1;s2<steps;s2+=2){
+      const t2=s2/steps;
+      px(CORE.x+dx*t2-1,CORE.y+dy*t2-1,3,3,'#7dd3fc');
+    }
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#7dd3fc'; ctx.font='bold 9px monospace'; ctx.textAlign='center';
+    ctx.fillText(`STRIKE ${Math.ceil(dl)}px — CLICK TO COMMIT`,snap(gx),snap(gy)-pr-10);
   }
   // ghost placement - snaps to orbit around anchor (station or linked asteroid)
   let ghostValid=false, ghostX=0,ghostY=0, ghostAnchor=null;
@@ -4473,20 +5007,24 @@ function render(){
     const fb=14;
     ctx.fillRect(0,0,W,fb); ctx.fillRect(0,H-fb,W,fb); ctx.fillRect(0,0,fb,H); ctx.fillRect(W-fb,0,fb,H);
   }
-  if((state===STATE.PLAYING||state===STATE.PAUSED) && hearts.length){
+  if((state===STATE.PLAYING||state===STATE.PAUSED) && (hearts.length||cores.length)){
     // heart compass: a faint pull toward the nearest off-screen heart.
-    // no words, just "something is out there."
+    // no words, just "something is out there." Cores pull harder (purple).
     const vc=viewCenter();
-    let nh=null, nd=1e18;
+    let nh=null, nd=1e18, isCore=false;
     for(const h of hearts){
       const d=Math.hypot(h.x-vc.x,h.y-vc.y);
-      if(d<nd){ nd=d; nh=h; }
+      if(d<nd){ nd=d; nh=h; isCore=false; }
+    }
+    for(const c of cores){
+      const d=Math.hypot(c.x-vc.x,c.y-vc.y)*0.7; // cores loom larger
+      if(d<nd){ nd=d; nh=c; isCore=true; }
     }
     if(nh){
       const s=worldToScreen(nh.x,nh.y);
       if(s.x<-20||s.x>W+20||s.y<-20||s.y>H+20){
         const ga=0.06+0.05*Math.sin(performance.now()*0.0025+nh.seed);
-        ctx.fillStyle=`rgba(251,113,133,${ga.toFixed(3)})`;
+        ctx.fillStyle=isCore?`rgba(192,132,252,${(ga+0.04).toFixed(3)})`:`rgba(251,113,133,${ga.toFixed(3)})`;
         const gw=26, gh=8;
         if(s.x<0) ctx.fillRect(0,H/2-gh/2,gw,gh);
         if(s.x>W) ctx.fillRect(W-gw,H/2-gh/2,gw,gh);
@@ -4539,6 +5077,8 @@ const warpBtnEl=document.getElementById('warpBtn');
 if(warpBtnEl) warpBtnEl.onclick=()=>openWarpScreen();
 const purgeBtnEl=document.getElementById('purgeDial');
 if(purgeBtnEl) purgeBtnEl.onclick=()=>{ ensureAudio(); buyCorePurge(); };
+const strikeBtnEl=document.getElementById('strikeDial');
+if(strikeBtnEl) strikeBtnEl.onclick=()=>{ ensureAudio(); armStrike(); updateBuildBar(); };
 document.getElementById('speedBtn').onclick=()=>{
   speedMult = speedMult===1?1.8: speedMult===1.8?2.6:1;
   document.getElementById('speedBtn').textContent='\u00D7'+speedMult;
@@ -4581,4 +5121,4 @@ window._game={resetRun, getState:()=>state, STATE, getCoins:()=>coins, getLives:
   getNodes:()=>asteroids.map(a=>({kind:nodeKind(a),name:nodeName(a),corr:nodeCorruption(a),surv:!!a.surveyed,g:NODE_ECON[a.kind||'belt'].yield,x:Math.round(a.x),y:Math.round(a.y),r:Math.round(a.r),ore:a.maxOre})),
   getScouts:()=>scouts.length, getUnsurveyed:()=>asteroids.filter(a=>!a.surveyed).length,
   getStar:()=>star, getPlanets:()=>planets, getBelt:()=>beltRocks, updateSolar:updateSolarSystem,
-  getClusters:()=>clusters.length, getTendrils:()=>tendrils.length, purge:buyCorePurge, getPurgeCd:()=>purgeCd, purgeUnlocked};
+  getClusters:()=>clusters.length, getCores:()=>cores.length, getTendrils:()=>tendrils.length, purge:buyCorePurge, getPurgeCd:()=>purgeCd, purgeUnlocked};
