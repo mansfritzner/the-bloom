@@ -193,7 +193,7 @@ function loadPerm(){
     }
   }catch(e){ coinsBank=0; permLevels={}; }
 }
-function savePerm(){ localStorage.setItem('atd_coins', coinsBank); localStorage.setItem('atd_perm', JSON.stringify(permLevels)); }
+function savePerm(){ try{ localStorage.setItem('atd_coins', coinsBank); localStorage.setItem('atd_perm', JSON.stringify(permLevels)); }catch(e){} }
 loadPerm();
 function permBonus(id){
   const lvl=permLevels[id]||0;
@@ -231,12 +231,12 @@ function loadProgress(){
   try{ prestigeWins=parseInt(localStorage.getItem('atd_prestige')||'0')||0; }catch(e){ prestigeWins=0; }
 }
 loadProgress();
-function saveProgress(){ localStorage.setItem('atd_prestige', prestigeWins); }
+function saveProgress(){ try{ localStorage.setItem('atd_prestige', prestigeWins); }catch(e){} }
 
 let stats={bestWave:0,bestKills:0,runs:0,totalKills:0,totalCoins:0};
 let lastRun=null;
 function loadStats(){ try{ const s=JSON.parse(localStorage.getItem('atd_stats')||'null'); if(s) stats={...stats,...s}; const lr=JSON.parse(localStorage.getItem('atd_last')||'null'); if(lr) lastRun=lr; }catch(e){} }
-function saveStats(){ localStorage.setItem('atd_stats', JSON.stringify(stats)); if(lastRun) localStorage.setItem('atd_last', JSON.stringify(lastRun)); }
+function saveStats(){ try{ localStorage.setItem('atd_stats', JSON.stringify(stats)); if(lastRun) localStorage.setItem('atd_last', JSON.stringify(lastRun)); }catch(e){} }
 loadStats();
 // M10: galaxy ledger — all-time totals across runs (localStorage).
 // Declared early: refreshMenuStats() runs during initial page eval.
@@ -282,6 +282,12 @@ let beltRocks=[]; // {angle,radiusOff,size,seed} visual debris ring around the s
 // anchors (they ARE drifting clusters/hulks). No floating nodes.
 let beltAnchors=[]; // {orbitR,angle,speed,x,y,res:[]}
 let drifters=[]; // {orbitR,angle,speed,x,y,res:[]} — derelict hulks on slow orbits
+// Forward outposts (declared early: buildWorld→validHeartSpot reads outposts
+// during initial page eval, before the systems below execute).
+const OUTPOST_COST=600, OUTPOST_MAX=2, OUTPOST_RELAY=350, OUTPOST_HP=300, OUTPOST_BUILD_TIME=18;
+let outposts=[]; // {x,y,r:20,name,hp,maxHp,seed,relayed,warnT,attackT,critLogged}
+let constructions=[]; // {x,y,tx,ty,phase:'travel'|'build',prog,speed,seed}
+let outpostPlacing=false;
 let myceliumBlocks=[]; // legacy (kept for save-compat); real cloud lives in mycCells
 let drones=[];
 let scouts=[]; // M5: survey wing — direct-flight charting, independent of hangar slots
@@ -892,6 +898,7 @@ function validHeartSpot(x,y){
   if(bloomLeashed(x,y)) return false;
   if(Math.hypot(x-CORE.x,y-CORE.y)<220) return false; // never on the doorstep
   for(const c of cores){ if(Math.hypot(x-c.x,y-c.y)<CORE_EXCLUDE) return false; } // a core's ground
+  for(const o of outposts){ if(Math.hypot(x-o.x,y-o.y)<o.r+40) return false; } // not on a foothold
   for(const a of asteroids){ if(Math.hypot(x-a.x,y-a.y)<a.r+40) return false; } // not inside a world
   for(const p of planets){
     if(Math.hypot(x-p.x,y-p.y)<p.r+40) return false; // not inside a planet
@@ -1015,10 +1022,19 @@ function tendrilHP(){ return Math.floor(50 + wave*3 + threatTime*0.15); }
 // in place instead of fading.
 function heartTendril(h, lenOverride, angOverride, rootFlag){
   if(activeTendrils()>=TENDRIL_MAX) return;
+  // Aim: the two networks collide — outposts under genuine threat get
+  // targeted too, otherwise asteroids, otherwise into the dark.
   let ang=angOverride!=null?angOverride:Math.random()*Math.PI*2;
-  if(angOverride==null && asteroids.length && Math.random()<0.5){
-    const t=asteroids[Math.floor(Math.random()*asteroids.length)];
-    ang=Math.atan2(t.y-h.y, t.x-h.x)+(Math.random()-0.5)*0.6;
+  if(angOverride==null){
+    const liveOut=outposts.filter(o=>o.hp>0);
+    const roll=Math.random();
+    if(liveOut.length && roll<0.3){
+      const t=liveOut[Math.floor(Math.random()*liveOut.length)];
+      ang=Math.atan2(t.y-h.y, t.x-h.x)+(Math.random()-0.5)*0.6;
+    } else if(asteroids.length && roll<0.65){
+      const t=asteroids[Math.floor(Math.random()*asteroids.length)];
+      ang=Math.atan2(t.y-h.y, t.x-h.x)+(Math.random()-0.5)*0.6;
+    }
   }
   const hp=tendrilHP();
   tendrils.push({pts:[{x:h.x,y:h.y}], ang, speed:26+Math.random()*10,
@@ -1548,6 +1564,10 @@ function asteroidAccess(a){
   if(a.unlocked) return {ok:true, via:'linked'};
   if(a.distCore<190) return {ok:true, via:'core'};
   if(a.distCore<hangarUplink()) return {ok:true, via:'uplink'};
+  for(const o of outposts){
+    // forward staging: an online outpost relays nearby worlds into the network
+    if(o.hp>0 && Math.hypot(a.x-o.x,a.y-o.y)<OUTPOST_RELAY) return {ok:true, via:'outpost', node:o};
+  }
   if(a.parent && a.parent!==CORE && a.parent.unlocked) return {ok:true, via:'chain', node:a.parent};
   const hop=relayHop(a);
   if(hop) return {ok:true, via:'hop', node:hop};
@@ -1655,6 +1675,138 @@ function sellValue(t){
   return Math.floor(total*0.6);
 }
 
+// ===== FORWARD OUTPOSTS — the civilization phase. Max 2, ever: the station
+// barely has the personnel, comms and reactor output for two remote crews.
+// An outpost is a foothold, not a second station: relay reach for nearby
+// worlds, deliver-to-nearest for short hauls, repair aura, 2 weapon slots.
+// No purge, no wing, no tech. The Bloom wants them dead.
+// (State + consts live with the world state near the top — page-eval order.)
+function outpostCount(){ return outposts.length+constructions.length; }
+function outpostUnlocked(){
+  // mature station + operating network: the last unlock, earned late
+  if(!strikeUnlocked()) return false;
+  if((stationTech.solar||0)<4) return false;
+  if((stationTech.lab||0)<3) return false;
+  if((stationTech.command||0)<3) return false;
+  if((stationTech.nav||0)<2) return false;
+  if(asteroids.filter(a=>a.unlocked).length<5) return false;
+  if(hangarLevels()<3) return false;
+  return true;
+}
+function outpostLockReason(){
+  if(!strikeUnlocked()) return 'bring STRIKE WING online first';
+  if((stationTech.solar||0)<4) return 'grow Solar Array to Lv4 (click station)';
+  if((stationTech.lab||0)<3) return 'grow Research Lab to Lv3 (click station)';
+  if((stationTech.command||0)<3) return 'grow Command Center to Lv3 (click station)';
+  if((stationTech.nav||0)<2) return 'grow Navigation Array to Lv2 (click station)';
+  if(asteroids.filter(a=>a.unlocked).length<5) return `link ${5-asteroids.filter(a=>a.unlocked).length} more trade lane(s)`;
+  if(hangarLevels()<3) return 'grow Hangar to Lv3 total';
+  return '';
+}
+function startOutpostPlacement(){
+  if(state!==STATE.PLAYING) return;
+  if(outpostPlacing){ outpostPlacing=false; toast('Outpost survey stood down', 'hint'); return; }
+  if(!outpostUnlocked()){ SFX.no(); flashHint('FORWARD OUTPOST offline — '+outpostLockReason()+'.'); return; }
+  if(outpostCount()>=OUTPOST_MAX){ SFX.no(); flashHint(`The station can crew only ${OUTPOST_MAX} outposts — lose one to rebuild.`); return; }
+  if(coins<OUTPOST_COST){ SFX.no(); flashHint(`Forward Outpost needs ${OUTPOST_COST}g — the single biggest purchase you'll make.`); return; }
+  outpostPlacing=true; placeType=null; ghostPos=null; strikeArming=false; selectedTower=null; hidePanel();
+  SFX.place();
+  toast('OUTPOST SURVEY — click open space to found it. Choose like it matters.', 'surge');
+  logEvent('<b>Outpost survey active.</b> Two crews, ever. Put them where the civilization needs them.', 'surge');
+}
+function outpostSiteInfo(x,y){
+  // placement readout: what would this ground give us?
+  const near=asteroids.filter(a=>a.surveyed&&Math.hypot(a.x-x,a.y-y)<500).map(nodeName);
+  const cloud=countVoxelsNear(x,y,250);
+  const linked=asteroids.filter(a=>a.unlocked).length;
+  return {near, cloud, linked};
+}
+function commitOutpost(x,y){
+  if(!outpostPlacing) return;
+  outpostPlacing=false;
+  if(!outpostUnlocked()||outpostCount()>=OUTPOST_MAX){ SFX.no(); return; }
+  if(coins<OUTPOST_COST){ SFX.no(); flashHint(`Forward Outpost needs ${OUTPOST_COST}g.`); return; }
+  if(Math.hypot(x-CORE.x,y-CORE.y)<150){ SFX.no(); flashHint('Too close to the station — push into the dark.'); return; }
+  for(const o of outposts.concat(constructions)){ const ox=o.tx!=null&&o.phase?o.tx:o.x, oy=o.ty!=null&&o.phase?o.ty:o.y;
+    if(Math.hypot(x-ox,y-oy)<250){ SFX.no(); flashHint('Too close to another outpost ground — spread the civilization.'); return; } }
+  if(star && Math.hypot(x-star.x,y-star.y)<star.r+30){ SFX.no(); flashHint('Not inside the star.'); return; }
+  for(const p of planets){
+    if(p.x!=null && Math.hypot(x-p.x,y-p.y)<p.r+30){ SFX.no(); flashHint('Onto open ground, not inside a planet — park beside it.'); return; }
+    for(const m of p.moons){ if(m.x!=null && Math.hypot(x-m.x,y-m.y)<m.r+24){ SFX.no(); flashHint('Beside the moon, not inside it.'); return; } }
+  }
+  if(bloomLeashed(x,y)){ SFX.no(); flashHint('Beyond construction range.'); return; }
+  coins-=OUTPOST_COST;
+  constructions.push({x:CORE.x,y:CORE.y,tx:x,ty:y,phase:'travel',prog:0,speed:220,seed:Math.random()*6.28});
+  SFX.wave();
+  const info=outpostSiteInfo(x,y);
+  logEvent(`<b>Construction fleet away.</b> ${info.near.length?('Ground covers: '+info.near.slice(0,3).join(', ')+(info.near.length>3?'…':'')):'Deep ground — no charted worlds in range yet.'} Bloom near site: ${info.cloud>30?'<b>HEAVY</b>':info.cloud>0?'present':'clear'}.`, info.cloud>30?'surge':'good');
+  toast('CONSTRUCTION FLEET AWAY', 'good');
+  updateBuildBar();
+}
+function updateOutposts(ddt){
+  // construction: travel, then assembly
+  for(let i=constructions.length-1;i>=0;i--){
+    const c=constructions[i];
+    if(c.phase==='travel'){
+      const dx=c.tx-c.x, dy=c.ty-c.y, dist=Math.hypot(dx,dy)||1;
+      c.x+=(dx/dist)*c.speed*ddt; c.y+=(dy/dist)*c.speed*ddt;
+      if(Math.random()<0.4) addParticles(c.x,c.y,1,'#facc15',30);
+      if(dist<24){ c.phase='build'; c.prog=0; logEvent('Construction fleet on site — assembly underway.', 'info'); }
+    } else {
+      c.prog+=ddt/OUTPOST_BUILD_TIME;
+      if(Math.random()<0.5) addParticles(c.tx+(Math.random()-0.5)*36,c.ty+(Math.random()-0.5)*36,2,'#facc15',50);
+      if(c.prog>=1){
+        constructions.splice(i,1);
+        const n=outposts.length+1;
+        const name='OUTPOST '+['I','II','III'][Math.min(n-1,2)];
+        outposts.push({x:c.tx,y:c.ty,r:20,name,hp:OUTPOST_HP,maxHp:OUTPOST_HP,seed:Math.random()*6.28,relayed:0,warnT:0,attackT:0,critLogged:false});
+        addParticles(c.tx,c.ty,40,'#7ce67c',150);
+        SFX.place(); shake=Math.min(6,shake+2);
+        logEvent(`<b>${name} ONLINE.</b> Relay, repairs and 2 weapon slots. It will draw the Bloom — defend it like history depends on it.`, 'good');
+        toast(`◈ ${name} ONLINE`, 'good');
+      }
+    }
+  }
+  // outposts live: contact damage, warnings, slow crew repair, loss
+  for(let i=outposts.length-1;i>=0;i--){
+    const o=outposts[i];
+    if(o.warnT>0) o.warnT-=ddt;
+    if(o.attackT>0) o.attackT-=ddt;
+    const touching=myceliumAtWorld(o.x,o.y,o.r+6);
+    if(touching){
+      o.hp-=7*ddt;
+      if(o.attackT<=0){
+        o.attackT=15;
+        logEvent(`<b>${o.name} UNDER ATTACK.</b> Purge it clean, park guns, or send the wing.`, 'bad');
+        toast(`${o.name} UNDER ATTACK`, 'bad');
+        SFX.no();
+      }
+      if(o.hp<90 && !o.critLogged){
+        o.critLogged=true;
+        logEvent(`<b>${o.name} CRITICAL.</b> It will not survive much more of this.`, 'surge');
+        toast(`${o.name} CRITICAL`, 'surge');
+      }
+    } else {
+      if(o.hp<o.maxHp) o.hp=Math.min(o.maxHp,o.hp+1*ddt); // crew repairs in quiet
+      if(o.hp>150) o.critLogged=false;
+      if(countVoxelsNear(o.x,o.y,220)>0 && o.warnT<=0){
+        o.warnT=20;
+        logEvent(`SENSOR — Bloom approaching ${o.name}.`, 'surge');
+      }
+    }
+    if(o.hp<=0){
+      outposts.splice(i,1);
+      addParticles(o.x,o.y,50,'#f87171',180);
+      shake=8; SFX.boom();
+      // its guns fall back to the station rather than haunting dead ground
+      for(const t of towers){
+        if(t.anchor && t.anchor.obj===o){ t.anchor={type:'core',obj:CORE,dist:0}; t.orbitR=38; }
+      }
+      logEvent(`<b>${o.name} LOST.</b> The crew is gone; the ground is open again. Rebuild — or cede the region.`, 'surge');
+      toast(`${o.name} LOST`, 'bad');
+    }
+  }
+}
 // ===== STATION TECH TREE (modules live INSIDE the station) =====
 // Data-driven rack: adding a module = one entry here + one effect branch.
 // Upgrading these grows your base itself: more wings, dishes and glow.
@@ -1815,7 +1967,7 @@ function armStrike(){
   if(!strikeUnlocked()){ SFX.no(); flashHint('STRIKE WING offline — '+strikeLockReason()+'.'); return; }
   if(strikeCd>0 || !defenseEstablished){ SFX.no(); return; }
   if(coins<STRIKE_COST){ SFX.no(); flashHint(`Strike Wing needs ${STRIKE_COST}g — hold the lanes a little longer.`); return; }
-  strikeArming=true; placeType=null; ghostPos=null; selectedTower=null; hidePanel();
+  strikeArming=true; placeType=null; ghostPos=null; outpostPlacing=false; selectedTower=null; hidePanel();
   SFX.place();
   toast('STRIKE WING ARMED — click the map to commit (right-click/X cancels)', 'surge');
   logEvent('<b>Strike Wing armed.</b> Pick where the fleet goes.', 'surge');
@@ -1957,6 +2109,7 @@ function resetRun(){
   bloomCalm=0; nextBloomIn=0; bloomWhispered=false; bloomCycles=0;
   purgeCd=0; purgeCharging=0; purgeFx=null;
   strikers=[]; strikeCd=0; strikeArming=false;
+  outposts=[]; constructions=[]; outpostPlacing=false;
   sysMods={ore:1, growth:1, hearts:0, derelicts:0, reward:1}; sysNameCur='Home'; pendingSys=null;
   stationTech={solar:0, lab:0, command:0, nav:0}; solarAcc=0; selectedStation=false;
   tremorTimer=22; tremorIdx=0; seenHeart=false; seenCloud=false;
@@ -2042,6 +2195,7 @@ function doWarp(force){
   budAcc=25;
   merging=null; mergeSig=''; mergeHold=0; mergeAcc=0;
   strikers=[]; strikeCd=0; strikeArming=false; // transient wing never survives warp
+  outpostPlacing=false; // placement never survives warp; online outposts do
   bloomCalm=0; nextBloomIn=0; bloomWhispered=false; bloomCycles=0;
   star=null; planets=[]; beltRocks=[];
   purgeGoal=Math.floor(purgeGoal*1.35);
@@ -2052,6 +2206,9 @@ function doWarp(force){
   for(const record of cometAnchors){
     if(record.index>=0 && asteroids[record.index]){
       record.tower.anchor.obj=asteroids[record.index];
+      record.tower.anchor.dist=0;
+    } else if(record.tower.anchor && record.tower.anchor.type==='outpost' && outposts.includes(record.tower.anchor.obj)){
+      // outpost guns stay with their outpost across warp — empire intact
       record.tower.anchor.dist=0;
     } else if(record.tower.anchor){
       record.tower.anchor={type:'core', obj:CORE, dist:0};
@@ -2357,7 +2514,7 @@ canvas.addEventListener('mousemove', e=>{
         const em0=NODE_ECON[a.kind||'belt'];
         const oreTxt=`${Math.floor(a.ore)}/${a.maxOre} ore • ${em0.yield}g/trip${a.maxOre>=100?' • RICH':''}`;
         const assigned=drones.some(d=>d.targetAsteroid===a);
-        const viaName=(c)=> c===CORE? 'Station' : nodeName(c);
+        const viaName=(c)=> c===CORE? 'Station' : (c&&c.name? c.name : nodeName(c));
         let status, how;
         if(!acc.ok && acc.why==='smothered'){ status='SMOTHERED'; how='purge the purple first'; }
         else if(acc.via==='linked'){ status='LINKED'; how=`lane open • ${assigned?'drone on site':'click to recall / reassign'}`; }
@@ -2365,6 +2522,7 @@ canvas.addEventListener('mousemove', e=>{
         else if(acc.via==='uplink'){ status='SEND DRONE'; how='in Hangar uplink — click to send!'; }
         else if(acc.via==='chain'){ status='SEND DRONE'; how=`chain open via ${viaName(acc.node)}`; }
         else if(acc.via==='hop'){ status='SEND DRONE'; how=`relay hop via ${viaName(acc.node)}`; }
+        else if(acc.via==='outpost'){ status='SEND DRONE'; how=`outpost relay via ${viaName(acc.node)}`; }
         else if(acc.why==='chain'){ status='LOCKED'; how=`link ${viaName(acc.node)} first, hop within 300, or add Hangar`; }
         else { status='TOO FAR'; how=`link nearer worlds or add Hangar (uplink ${Math.floor(hangarUplink())})`; }
         const cs0=nodeCorruption(a); // M4: infection readout overrides route status
@@ -2402,7 +2560,7 @@ canvas.addEventListener('mousemove', e=>{
     else tooltip.classList.add('hidden');
   } else if(tooltip) tooltip.classList.add('hidden');
 });
-canvas.addEventListener('contextmenu', e=>{ e.preventDefault(); if(suppressContext){ suppressContext=false; return; } if(placeType){ placeType=null; ghostPos=null; updateBuildBar(); } else if(strikeArming){ strikeArming=false; toast('STRIKE WING stood down', 'hint'); updateBuildBar(); } else { selectedTower=null; hidePanel(); } });
+canvas.addEventListener('contextmenu', e=>{ e.preventDefault(); if(suppressContext){ suppressContext=false; return; } if(placeType){ placeType=null; ghostPos=null; updateBuildBar(); } else if(strikeArming){ strikeArming=false; toast('STRIKE WING stood down', 'hint'); updateBuildBar(); } else if(outpostPlacing){ outpostPlacing=false; toast('Outpost survey stood down', 'hint'); } else { selectedTower=null; hidePanel(); } });
 function handleWorldClick(sx,sy){
   if(state!==STATE.PLAYING) return;
   const w=screenToWorld(sx,sy), x=w.x, y=w.y;
@@ -2418,6 +2576,11 @@ function handleWorldClick(sx,sy){
   if(strikeArming){
     // manual strike: the click IS the order — fleet flies at this point
     commitStrike(x,y);
+    return;
+  }
+  if(outpostPlacing){
+    // founding click: the map IS the decision
+    commitOutpost(x,y);
     return;
   }
   // celestial bodies first: planets ARE their resources — clicking a world
@@ -2436,6 +2599,13 @@ function handleWorldClick(sx,sy){
     const a=asteroids[i];
     if(Math.hypot(a.x-x, a.y-y) < a.r+12/cam.zoom){
       handleNodeClick(a);
+      return;
+    }
+  }
+  for(const o of outposts){
+    if(Math.hypot(o.x-x, o.y-y) < o.r+14/cam.zoom){
+      const guns=towers.filter(t=>t.anchor&&t.anchor.obj===o&&!t.isModule).length;
+      flashHint(`${o.name} • hull ${Math.max(0,Math.floor(o.hp))}/${o.maxHp} • guns ${guns}/2 • relayed ${Math.floor(o.relayed)}g`);
       return;
     }
   }
@@ -2598,6 +2768,11 @@ function findNearestAnchor(x,y){
     const d=Math.hypot(a.x-x,a.y-y);
     if(d<88 && d<bestD){ best={type:'asteroid', obj:a, dist:d}; bestD=d; }
   }
+  for(const o of outposts){
+    // online outposts host 2 weapons like a world — forward firing positions
+    const d=Math.hypot(o.x-x,o.y-y);
+    if(d<88 && d<bestD){ best={type:'outpost', obj:o, dist:d}; bestD=d; }
+  }
   return best;
 }
 function tryPlace(x,y){
@@ -2750,6 +2925,7 @@ function updateBuildBar(){
         if(coins < d.cost && !b.classList.contains('selected')){ SFX.no(); return; }
         placeType=d.id; { const wpt=screenToWorld(mouse.x,mouse.y); ghostPos={x:wpt.x,y:wpt.y}; }
         if(strikeArming) strikeArming=false;
+        if(outpostPlacing) outpostPlacing=false;
         selectedTower=null; hidePanel();
         toast(`Placing ${d.name} — CLICK a glowing ring (Station or linked world). Right-click cancels.`, 'info');
         ensureAudio();
@@ -2829,6 +3005,11 @@ const TOWER_ROLE={
 function towerSlotInfo(t){
   if(!t.anchor) return 'Slot: free';
   if(t.anchor.obj===CORE) return t.isModule?`Station module ${stationModuleCount()}/3`:`Station weapon ${stationWeaponCount()}/3`;
+  if(t.anchor.type==='outpost'){
+    const o=t.anchor.obj;
+    const n=towers.filter(x=>x.anchor && x.anchor.obj===o && (!!x.isModule===!!t.isModule)).length;
+    return `${o.name} ${t.isModule?'module':'weapon'} ${n}/2`;
+  }
   const i=asteroids.indexOf(t.anchor.obj);
   const n=towers.filter(o=>o.anchor && o.anchor.obj===t.anchor.obj && (!!o.isModule===!!t.isModule)).length;
   return `${nodeName(t.anchor.obj)} ${t.isModule?'module':'weapon'} ${n}/2`;
@@ -2894,10 +3075,35 @@ function showStationPanel(){
         <button id="techBtn-${id}" class="tech-btn" ${maxed||!avail||coins<c?'disabled':''}>${maxed?'MAXED':!avail?lock:`UPGRADE — ${c} <span class="coin sm"></span>`}</button>
       </div>`;
     }).join('')}
+    ${outpostPanelHTML()}
   `;
   statsEl.querySelectorAll('.tech-btn').forEach(b=>{
     b.onclick=()=>buyTech(b.id.replace('techBtn-',''));
   });
+  const ob=document.getElementById('outpostBuildBtn');
+  if(ob) ob.onclick=()=>{ ensureAudio(); startOutpostPlacement(); };
+}
+// Forward Outposts live in the station panel: the final unlock, earned late.
+function outpostPanelHTML(){
+  const rows=outposts.map(o=>{
+    const pct=Math.max(0,Math.round(o.hp/o.maxHp*100));
+    return `<div class="tech-desc">◈ <b>${o.name}</b> • hull ${pct}% • relayed ${Math.floor(o.relayed)}g${o.hp<90?' • <b style="color:#f87171">CRITICAL</b>':''}</div>`;
+  }).join('');
+  const building=constructions.map(()=>'<div class="tech-desc">◌ Construction fleet underway…</div>').join('');
+  const unlocked=outpostUnlocked();
+  const full=outpostCount()>=OUTPOST_MAX;
+  const afford=coins>=OUTPOST_COST;
+  const can=!full&&unlocked&&afford;
+  const btn=full?`CREWED ${outposts.length}/${OUTPOST_MAX} — lose one to rebuild`
+    :!unlocked?outpostLockReason()
+    :!afford?`Needs ${OUTPOST_COST}g`
+    :`FOUND OUTPOST — ${OUTPOST_COST} <span class="coin sm"></span>`;
+  return `<div class="tech-row">
+    <div class="tech-head"><span>◈ <b>Forward Outpost</b></span><span class="tech-pips">${outposts.length}/${OUTPOST_MAX}</span></div>
+    <div class="tech-desc">A permanent foothold anywhere: relay reach, short deliveries, crew repairs, 2 weapon slots. Max ${OUTPOST_MAX}, ever — the station can crew no more. It will draw the Bloom.</div>
+    ${rows}${building}
+    <button id="outpostBuildBtn" class="tech-btn" ${can?'':'disabled'}>${btn}</button>
+  </div>`;
 }
 function showPanel(t){
   selectedStation=false;
@@ -3155,6 +3361,7 @@ addEventListener('keydown', e=>{
   if(k==='escape'){
     if(placeType){ placeType=null; ghostPos=null; updateBuildBar(); }
     else if(strikeArming){ strikeArming=false; toast('STRIKE WING stood down', 'hint'); updateBuildBar(); }
+    else if(outpostPlacing){ outpostPlacing=false; toast('Outpost survey stood down', 'hint'); }
     else if(selectedTower||selectedStation){ selectedTower=null; hidePanel(); }
     else if(state===STATE.PLAYING) setState(STATE.PAUSED);
     else if(state===STATE.PAUSED) setState(STATE.PLAYING);
@@ -3177,6 +3384,7 @@ addEventListener('keydown', e=>{
       else {
         placeType=def.id; { const wpt=screenToWorld(mouse.x,mouse.y); ghostPos={x:wpt.x,y:wpt.y}; }
         if(strikeArming) strikeArming=false; // tower tools stand the wing down
+        if(outpostPlacing) outpostPlacing=false;
         selectedTower=null; hidePanel();
         toast(`Placing ${def.name} — CLICK a glowing ring (Station or linked world). Right-click cancels.`, 'info');
       }
@@ -3408,19 +3616,35 @@ function update(dt){
         d.y += (dy/len)*d.speed*logisticsSpeedMult()*slowF*ddt;
       }
     } else {
-      // return to core
-      const dx=CORE.x-d.x, dy=CORE.y-d.y, len=Math.hypot(dx,dy)||1;
-      if(len < CORE.r+8){
+      // return leg: deliver to the station or the nearest online outpost,
+      // whichever is closer — distant operations stay viable through outposts
+      let destX=CORE.x, destY=CORE.y, destR=CORE.r, destOut=null;
+      let bestD=Math.hypot(CORE.x-d.x,CORE.y-d.y);
+      for(const o of outposts){
+        if(o.hp<=0) continue;
+        const od=Math.hypot(o.x-d.x,o.y-d.y);
+        if(od<bestD){ bestD=od; destX=o.x; destY=o.y; destR=o.r; destOut=o; }
+      }
+      d.deliverOut=(destOut&&destOut.hp>0)?destOut:null;
+      const dx=destX-d.x, dy=destY-d.y, dlen=Math.hypot(dx,dy)||1;
+      if(dlen < destR+8){
         d.carrying=false;
         d.routeIndex=0;
         const em=NODE_ECON[(d.targetAsteroid&&d.targetAsteroid.kind)||'belt'];
         const gain=em.yield+droneYieldBonus()+((d.targetAsteroid&&d.targetAsteroid.cstate==='infected')?2:0);
         coins+=gain;
-        addParticles(CORE.x,CORE.y,6,'#ffd166'); addNum(CORE.x,CORE.y-12,'+'+gain+'g', '#ffd166'); SFX.coin();
-        if(em.purge){ purgeTotal+=em.purge; addNum(CORE.x,CORE.y-24,'+'+em.purge+' purge','#e9d5ff'); checkMilestones(); }
+        if(destOut){ destOut.relayed+=gain; addNum(destX,destY-14,'+'+gain+'g → relay', '#7ce67c'); }
+        addParticles(destX,destY,6,'#ffd166'); addNum(destX,destY-12,'+'+gain+'g', '#ffd166'); SFX.coin();
+        if(em.purge){ purgeTotal+=em.purge; addNum(destX,destY-24,'+'+em.purge+' purge','#e9d5ff'); checkMilestones(); }
       } else {
-        d.x += (dx/len)*d.speed*logisticsSpeedMult()*1.15*slowF*ddt;
-        d.y += (dy/len)*d.speed*logisticsSpeedMult()*1.15*slowF*ddt;
+        d.x += (dx/dlen)*d.speed*logisticsSpeedMult()*1.15*slowF*ddt;
+        d.y += (dy/dlen)*d.speed*logisticsSpeedMult()*1.15*slowF*ddt;
+      }
+    }
+    // repair aura: crews patch up near a live outpost
+    if(d.hp<d.maxHp){
+      for(const o of outposts){
+        if(o.hp>0 && Math.hypot(o.x-d.x,o.y-d.y)<120){ d.hp=Math.min(d.maxHp,d.hp+4*ddt); break; }
       }
     }
     // drones avoid mycelium? small wobble
@@ -3477,6 +3701,8 @@ function update(dt){
   if(state!==STATE.PLAYING) return; // die() may have fired inside growth
   updatePurge(ddt);
   updateStrikers(ddt);
+  if(state!==STATE.PLAYING) return;
+  updateOutposts(ddt);
   if(state!==STATE.PLAYING) return;
   enemies.length=0; waveSpawning=false;
   // drift motes (pre-defense spores on the wind) + first-sighting checks
@@ -3792,6 +4018,7 @@ function getObjective(){
   const unS=asteroids.filter(a=>!a.surveyed).length;
   if(unS>0) return {step:6, text:'Chart unknown worlds', detail:`${unS} ? signatures left — scouts earn 8g each`};
   if(cores.length) return {step:7, text:'Siege the Bloom Core', detail:`◉ ${cores.length} core(s) • clear its colony first • territory stays`};
+  if(outpostUnlocked() && outposts.length===0 && constructions.length===0) return {step:7, text:'Found a Forward Outpost', detail:'click the Station — 2 crews, ever. Choose like it matters'};
   return {step:7, text:'Hold against the hearts', detail:`${hearts.length} ♥ pulsing • growth ${myceliumMass()} • click Station for tech`};
 }
 
@@ -3912,6 +4139,11 @@ function updateUI(){
       const d=STATION_TECH[id], maxed=stationTech[id]>=d.max;
       const can=!maxed&&techAvailable(id)&&coins>=techCost(id);
       b.disabled=!can; b.classList.toggle('disabled',!can);
+    }
+    const ob2=document.getElementById('outpostBuildBtn');
+    if(ob2){
+      const can2=outpostUnlocked()&&outpostCount()<OUTPOST_MAX&&coins>=OUTPOST_COST;
+      ob2.disabled=!can2; ob2.classList.toggle('disabled',!can2);
     }
   }
   if(selectedTower){
@@ -4792,6 +5024,80 @@ function render(){
       px(t.anchor.obj.x+Math.cos(ang)*t.orbitR-1,t.anchor.obj.y+Math.sin(ang)*t.orbitR-1,2,2,'rgba(226,232,240,0.25)');
     }
   }
+  // FORWARD OUTPOSTS: small industrial kin of the station — hub box, dock
+  // arms, antenna with ping, warm windows, hp bar. Reads as "ours" at a glance.
+  for(const o of outposts){
+    const ox=snap(o.x), oy=snap(o.y);
+    const hurt=o.hp<90;
+    px(ox-16,oy+18,32,4,'rgba(0,0,0,0.35)');
+    pxBox(ox-18,oy-8,36,16,hurt?'#7f1d1d':'#1e3a5f','#020617');
+    pxBox(ox-7,oy-14,14,28,hurt?'#991b1b':'#0c2740','#38bdf8');
+    px(ox-4,oy-8,8,8,'#38bdf8');
+    px(ox-4,oy-8,8,2,'#e0f2fe');
+    for(let wn=0;wn<3;wn++) px(ox-14+wn*10,oy+1,5,3,'#fef9c3'); // warm windows
+    px(ox-24,oy-2,6,5,'#0c2740'); px(ox+18,oy-2,6,5,'#0c2740'); // dock arms
+    const dockBlink=Math.sin(nowS*4+o.seed)>0;
+    px(ox-24,oy-2,2,2,dockBlink?'#4ade80':'#14532d');
+    px(ox+22,oy-2,2,2,dockBlink?'#14532d':'#4ade80');
+    px(ox-1,oy-26,2,10,'#e2e8f0'); px(ox-2,oy-29,4,3,'#facc15'); // antenna
+    if(Math.sin(nowS*3+o.seed)>0) px(ox-1,oy-31,2,2,'#ffffff'); // ping
+    if(myceliumAtWorld(ox,oy,o.r+8)){
+      pxBox(ox-24,oy-24,48,48,'rgba(168,85,247,0.15)','#a855f7');
+    }
+    const opct=Math.max(0,o.hp/o.maxHp);
+    const obarC=opct<0.3?'#ef4444':opct<0.6?'#facc15':'#7ce67c';
+    px(ox-20,oy+24,40,5,'#020617');
+    px(ox-19,oy+25,38*opct,3,obarC);
+    ctx.fillStyle=hurt?'#fca5a5':'#fff'; ctx.font='bold 9px monospace'; ctx.textAlign='center';
+    ctx.fillText(o.name, ox, oy+o.r+18);
+    if(cam.zoom>=0.8 && o.relayed>0){
+      ctx.fillStyle='rgba(124,230,124,0.75)'; ctx.font='bold 8px monospace';
+      ctx.fillText(`relayed ${Math.floor(o.relayed)}g`, ox, oy+o.r+30);
+    }
+  }
+  // construction sites: the fleet on-site + rising frame + progress bar
+  for(const c of constructions){
+    const cx=c.phase==='travel'?snap(c.x):snap(c.tx), cy=c.phase==='travel'?snap(c.y):snap(c.ty);
+    for(let s2=0;s2<3;s2++){
+      const sa=c.seed+s2*Math.PI*2/3+nowS*0.8;
+      const bx2=cx+Math.cos(sa)*14, by2=cy+Math.sin(sa)*14;
+      px(bx2-3,by2-2,6,4,'#facc15');
+      px(bx2-3,by2-2,6,1,'#fef9c3');
+    }
+    if(c.phase==='build'){
+      const f=c.prog||0;
+      pxBox(cx-16,cy-12,32,24,'rgba(30,58,95,0.85)','#020617');
+      px(cx-16,cy+12-Math.round(24*f),32,Math.max(2,Math.round(24*f)),'#38bdf8'); // rising frame
+      px(cx-22,cy+18,44,5,'#020617');
+      px(cx-21,cy+19,42*f,3,'#facc15');
+      ctx.fillStyle='#facc15'; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+      ctx.fillText('BUILDING '+Math.floor(f*100)+'%',cx,cy-20);
+    } else {
+      ctx.fillStyle='rgba(250,204,21,0.8)'; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+      ctx.fillText('CONSTRUCTION FLEET',cx,cy-20);
+    }
+  }
+  // outpost survey ghost: relay radius + live site readout
+  if(outpostPlacing && ghostPos && (state===STATE.PLAYING||state===STATE.PAUSED)){
+    const gx=ghostPos.x, gy=ghostPos.y;
+    ctx.globalAlpha=0.10;
+    ctx.fillStyle='#7ce67c';
+    ctx.fillRect(snap(gx-OUTPOST_RELAY),snap(gy-OUTPOST_RELAY),OUTPOST_RELAY*2,OUTPOST_RELAY*2);
+    ctx.globalAlpha=1;
+    ctx.fillStyle='rgba(124,230,124,0.6)';
+    for(let a=0;a<36;a++){
+      const aa=a/36*Math.PI*2;
+      if(a%2) continue;
+      px(gx+Math.cos(aa)*OUTPOST_RELAY-1,gy+Math.sin(aa)*OUTPOST_RELAY-1,2,2,'rgba(124,230,124,0.6)');
+    }
+    px(gx-3,gy-3,6,6,'#7ce67c');
+    px(gx-1,gy-1,2,2,'#ffffff');
+    const info=outpostSiteInfo(gx,gy);
+    ctx.fillStyle='#fff'; ctx.font='bold 9px monospace'; ctx.textAlign='center';
+    ctx.fillText(`OUTPOST SITE — ${info.near.length} world(s) in relay`,snap(gx),snap(gy)-OUTPOST_RELAY-12);
+    ctx.fillStyle=info.cloud>30?'#f0abfc':'#7ce67c'; ctx.font='bold 8px monospace';
+    ctx.fillText(info.cloud>30?'BLOOM: HEAVY — it will come for this ground':(info.cloud>0?'BLOOM: present':'BLOOM: clear'),snap(gx),snap(gy)-OUTPOST_RELAY-24);
+  }
   // PIXEL drones: 11x7 chunky haulers with nav lights + mining rig
   for(const d of drones){    if(d.flash>0) d.flash-=0.016;
     const dx=snap(d.x), dy=snap(d.y);
@@ -4990,9 +5296,12 @@ function render(){
       }
       prev=node;
     }
+    // cargo goes home to the station — or to the nearer outpost relay
+    let homeX=CORE.x, homeY=CORE.y;
+    if(d.carrying && d.deliverOut && d.deliverOut.hp>0){ homeX=d.deliverOut.x; homeY=d.deliverOut.y; }
     if(d.carrying){
       const t = (performance.now()*0.001 + d.x*0.005) % 1;
-      px(d.x+(CORE.x-d.x)*t-2,d.y+(CORE.y-d.y)*t-2,5,5,'#fde68a');
+      px(d.x+(homeX-d.x)*t-2,d.y+(homeY-d.y)*t-2,5,5,'#fde68a');
     } else {
       const t = (performance.now()*0.0012) % 1;
       px(CORE.x+(waypoint.x-CORE.x)*t-1,CORE.y+(waypoint.y-CORE.y)*t-1,3,3,'rgba(148,163,184,0.7)');
@@ -5166,4 +5475,5 @@ window._game={resetRun, getState:()=>state, STATE, getCoins:()=>coins, getLives:
   getNodes:()=>asteroids.map(a=>({kind:nodeKind(a),name:nodeName(a),corr:nodeCorruption(a),surv:!!a.surveyed,g:NODE_ECON[a.kind||'belt'].yield,x:Math.round(a.x),y:Math.round(a.y),r:Math.round(a.r),ore:a.maxOre})),
   getScouts:()=>scouts.length, getUnsurveyed:()=>asteroids.filter(a=>!a.surveyed).length,
   getStar:()=>star, getPlanets:()=>planets, getBelt:()=>beltRocks, updateSolar:updateSolarSystem,
-  getClusters:()=>clusters.length, getCores:()=>cores.length, getTendrils:()=>tendrils.length, purge:buyCorePurge, getPurgeCd:()=>purgeCd, purgeUnlocked};
+  getClusters:()=>clusters.length, getCores:()=>cores.length, getTendrils:()=>tendrils.length, purge:buyCorePurge, getPurgeCd:()=>purgeCd, purgeUnlocked,
+  getOutposts:()=>outposts.map(o=>({name:o.name,x:Math.round(o.x),y:Math.round(o.y),hp:Math.round(o.hp),relayed:Math.floor(o.relayed)})), outpostUnlocked};

@@ -139,6 +139,7 @@ body{font-family:'Courier New',ui-monospace,Menlo,Consolas,monospace;background:
 #mapLegend span{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .legend-mark{display:inline-block;width:18px;height:4px;border-radius:2px}
 .station-mark{width:10px;height:10px;border:2px solid #7dd3fc;border-radius:2px;background:#172033}
+.outpost-mark{width:10px;height:10px;border:2px solid #38bdf8;border-radius:2px;background:#1e3a5f;box-shadow:0 0 4px rgba(125,211,252,0.6)}
 .lane-mark{background:#7ce67c;box-shadow:2px 2px 0 rgba(0,0,0,0.5)}
 .star-mark{width:10px;height:10px;background:#fbbf24;border:2px solid #7c2d12;border-radius:50%}
 .planet-mark{width:10px;height:10px;background:#3b82f6;border:2px solid #020617;border-radius:50%}
