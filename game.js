@@ -126,10 +126,26 @@ buildPixelSky();
 // One fixed map — no seeds, no weekly rotation. The layout table in
 // buildWorld IS the galaxy, same every expedition.
 
-// audio
-let audioCtx=null;
+// audio — a tiny mix bus, not a pile of oscillators.
+// Late game runs 20+ towers: every shot/impact/delivery used to scream at
+// fixed volume with unlimited polyphony (the "smattering" wall). Now:
+// per-type throttle buckets, a voice cap that ducks filler first, a master
+// gain with persisted mute, and distance-aware volume for world sounds.
+let audioCtx=null, masterGain=null, muted=false;
 let musicEl=null;
-function ensureAudio(){ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
+let sfxLast={}; // throttle bucket -> last play time (seconds)
+let sfxVoices=0;
+const SFX_MAX_VOICES=10;
+function restoreMute(){ try{ muted=localStorage.getItem('atd_mute')==='1'; }catch(e){ muted=false; } }
+restoreMute();
+function ensureAudio(){
+  if(!audioCtx){
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    masterGain=audioCtx.createGain();
+    masterGain.gain.value=muted?0:1;
+    masterGain.connect(audioCtx.destination);
+  }
+}
 function startMusic(){
   if(!musicEl){
     musicEl=new Audio('bloom-loop.wav');
@@ -138,34 +154,111 @@ function startMusic(){
     musicEl.volume=0.18;
   }
   musicEl.play().catch(()=>{});
+  ensureBloomBed();
 }
 function stopMusic(){
   if(musicEl) musicEl.pause();
 }
-function tone(freq,dur=0.12,type='sine',vol=0.2,slideTo){
+function setMuted(m){
+  muted=!!m;
+  try{ localStorage.setItem('atd_mute',muted?'1':'0'); }catch(e){}
+  if(masterGain) masterGain.gain.value=muted?0:1;
+  const b=document.getElementById('muteBtn');
+  if(b){ b.textContent=muted?'✕':'♪'; b.title=muted?'Unmute (M)':'Mute (M)'; }
+}
+// On-screen events read full volume; off-screen ones fall back to a distant
+// wash instead of shouting across the system.
+function heardAt(x,y,base){
+  try{
+    const s=worldToScreen(x,y);
+    const on=s.x>-40&&s.x<W+40&&s.y>-40&&s.y<H+40;
+    return base*(on?1:0.28);
+  }catch(e){ return base; }
+}
+function tone(freq,dur=0.12,type='sine',vol=0.2,slideTo,key,minGap,priority){
   try{
     ensureAudio(); if(audioCtx.state==='suspended') audioCtx.resume();
+    if(muted) return false;
+    if(key){
+      const now=performance.now()/1000;
+      if(now-(sfxLast[key]||-9)<(minGap||0)) return false; // bucket throttle: spam in, groove out
+      sfxLast[key]=now;
+    }
+    if(sfxVoices>=SFX_MAX_VOICES && !priority) return false; // duck filler when busy
+    sfxVoices++;
     const o=audioCtx.createOscillator(), g=audioCtx.createGain();
-    o.type=type; o.frequency.value=freq; g.gain.value=vol; o.connect(g); g.connect(audioCtx.destination); o.start();
+    o.type=type; o.frequency.value=freq; g.gain.value=vol; o.connect(g); g.connect(masterGain); o.start();
     if(slideTo) o.frequency.exponentialRampToValueAtTime(slideTo,audioCtx.currentTime+dur);
     g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur); o.stop(audioCtx.currentTime+dur+0.02);
-  }catch(e){}
+    o.onended=()=>{ sfxVoices=Math.max(0,sfxVoices-1); };
+    setTimeout(()=>{ sfxVoices=Math.max(0,sfxVoices-1); },(dur+0.1)*1000); // backstop if onended never fires
+    return true;
+  }catch(e){ return false; }
 }
 const SFX={
-  shoot:()=>tone(720,0.07,'square',0.12,880),
-  hit:()=>tone(220,0.06,'square',0.13),
-  kill:()=>{tone(300,0.09,'triangle',0.18,150); setTimeout(()=>tone(600,0.07,'sine',0.13),60)},
-  coin:()=>tone(900,0.11,'sine',0.12,1200),
-  place:()=>{tone(400,0.09,'sine',0.2,600); setTimeout(()=>tone(700,0.09,'triangle',0.15),80)},
-  hurt:()=>tone(140,0.22,'sawtooth',0.2,80),
-  wave:()=>{tone(300,0.18,'sine',0.22,500); setTimeout(()=>tone(600,0.18,'sine',0.22),140)},
-  no:()=>tone(120,0.15,'square',0.15,80),
-  heal:()=>{tone(440,0.12,'sine',0.14,660); setTimeout(()=>tone(550,0.10,'sine',0.12),90)},
-  pierce:()=>tone(880,0.06,'triangle',0.11,1100),
-  tremorSnd:()=>tone(55,1.1,'sawtooth',0.10,38),
-  sting:()=>{tone(160,0.7,'sine',0.12,340); setTimeout(()=>tone(82,0.9,'triangle',0.10,55),120)},
-  boom:()=>{tone(90,1.0,'sawtooth',0.16,40); setTimeout(()=>tone(220,0.5,'square',0.08,60),80)},
+  shoot:(x,y)=>tone(720,0.07,'square',x==null?0.12:heardAt(x,y,0.12),880,'shoot',0.09),
+  hit:(x,y)=>tone(220,0.06,'square',x==null?0.13:heardAt(x,y,0.13),undefined,'hit',0.07),
+  kill:(x,y)=>{const v=x==null?0.18:heardAt(x,y,0.18); if(!tone(300,0.09,'triangle',v,150,'kill',0.15,true)) return; setTimeout(()=>tone(600,0.07,'sine',v*0.7,undefined,undefined,0,true),60)},
+  coin:(x,y)=>tone(900,0.11,'sine',x==null?0.12:heardAt(x,y,0.12),1200,'coin',0.12),
+  place:()=>{tone(400,0.09,'sine',0.2,600,undefined,0,true); setTimeout(()=>tone(700,0.09,'triangle',0.15,undefined,undefined,0,true),80)},
+  hurt:()=>tone(140,0.22,'sawtooth',0.2,80,undefined,0,true),
+  wave:()=>{tone(300,0.18,'sine',0.22,500,undefined,0,true); setTimeout(()=>tone(600,0.18,'sine',0.22,undefined,undefined,0,true),140)},
+  no:()=>tone(120,0.15,'square',0.15,80,undefined,0,true),
+  heal:()=>{tone(440,0.12,'sine',0.14,660,undefined,0,true); setTimeout(()=>tone(550,0.10,'sine',0.12,undefined,undefined,0,true),90)},
+  pierce:(x,y)=>tone(880,0.06,'triangle',x==null?0.11:heardAt(x,y,0.11),1100,'pierce',0.12),
+  tremorSnd:()=>tone(55,1.1,'sawtooth',0.10,38,undefined,0,true),
+  sting:()=>{tone(160,0.7,'sine',0.12,340,undefined,0,true); setTimeout(()=>tone(82,0.9,'triangle',0.10,55,undefined,0,true),120)},
+  boom:(x,y)=>{const v=x==null?0.16:heardAt(x,y,0.16); tone(90,1.0,'sawtooth',v,40,undefined,0,true); setTimeout(()=>tone(220,0.5,'square',v*0.5,60,undefined,0,true),80)},
 };
+// The Bloom has a voice: a low detuned rumble bed that swells with living
+// mass, plus a slow heart-thump that quickens as organs multiply. This is
+// what makes late game SOUND late game — dread you feel before you see.
+let bedNodes=null; // {gain, filter}
+let ambAcc=0, heartBeatAcc=0;
+function ensureBloomBed(){
+  try{
+    ensureAudio();
+    if(bedNodes) return;
+    const filt=audioCtx.createBiquadFilter();
+    filt.type='lowpass'; filt.frequency.value=220; filt.Q.value=0.6;
+    const g=audioCtx.createGain(); g.gain.value=0;
+    filt.connect(g); g.connect(masterGain);
+    for(const f of [55,55.7,110.4]){
+      const o=audioCtx.createOscillator();
+      o.type='sawtooth'; o.frequency.value=f;
+      const og=audioCtx.createGain(); og.gain.value=0.3;
+      o.connect(og); og.connect(filt); o.start();
+    }
+    bedNodes={gain:g};
+  }catch(e){}
+}
+function updateAmbient(ddt){
+  if(!audioCtx || !bedNodes) return;
+  const active=(state===STATE.PLAYING||state===STATE.PAUSED);
+  // rumble follows living mass — smooth, never a jump
+  const massFrac=Math.min(1,mycCells.size/Math.max(1,MYC_CAP));
+  const nearBoost=(typeof mycNearStation!=='undefined' && mycNearStation)?0.02:0;
+  const target=(!active||muted)?0:Math.min(0.075,massFrac*0.06+nearBoost);
+  try{ bedNodes.gain.gain.setTargetAtTime(target,audioCtx.currentTime,0.6); }catch(e){}
+  ambAcc+=ddt;
+  if(ambAcc<0.25) return;
+  ambAcc=0;
+  if(!active||muted) return;
+  // heart-thump: sparse early, insistent late
+  const kh=knownHearts().length+knownCores().length;
+  if(kh>0){
+    heartBeatAcc+=0.25;
+    const interval=Math.max(1.1,2.6-kh*0.25);
+    if(heartBeatAcc>=interval){
+      heartBeatAcc=0;
+      tone(48,0.5,'sine',Math.min(0.16,0.08+kh*0.015),36,'heartbeat',0.5,true);
+    }
+  }
+  // the loop breathes with the threat — barely louder when the sky is full
+  if(musicEl && !musicEl.paused){
+    try{ musicEl.volume=0.16+Math.min(0.10,massFrac*0.10); }catch(e){}
+  }
+}
 
 // permanent upgrades - tower unlocks + stats
 const PERM_MAX=10;
@@ -1390,7 +1483,7 @@ function damageEntitiesAt(wx,wy,dmg,radius,opts){
     if(p.hp<=0){
       pods.splice(i,1); kills++; purgeTotal+=5;
       coins+=12; addNum(p.x,p.y-10,'+12g • POPPED','#f0abfc');
-      addParticles(p.x,p.y,16,'#f0abfc',110); SFX.kill();
+      addParticles(p.x,p.y,16,'#f0abfc',110); SFX.kill(p.x,p.y);
       logEvent(isKnown(p.x,p.y)?'Spore pod popped! (+5 purge)':'Distant spore burst on scope. (+5 purge)', 'good');
       checkMilestones();
     }
@@ -1404,7 +1497,7 @@ function damageEntitiesAt(wx,wy,dmg,radius,opts){
     if(c.hp<=0){
       clusters.splice(i,1); kills++; purgeTotal+=8;
       coins+=18; addNum(c.x,c.y-10,'GROWTH BURNED +18g','#c084fc');
-      addParticles(c.x,c.y,20,'#c084fc',120); SFX.kill();
+      addParticles(c.x,c.y,20,'#c084fc',120); SFX.kill(c.x,c.y);
       logEvent(isKnown(c.x,c.y)?'Growth burned before it could root. (+8 purge)':'Distant growth burns on scope. (+8 purge)', 'good');
       checkMilestones();
     }
@@ -1420,7 +1513,7 @@ function damageEntitiesAt(wx,wy,dmg,radius,opts){
       const pb=h.primary?25:0; // M9: primary pays extra bounty
       purgeTotal+=25+pb;
       coins+=40+(h.primary?20:0); addNum(h.x,h.y-16,h.primary?'PRIMARY SLAIN +60g':'HEART SLAIN +40g','#fb7185');
-      addParticles(h.x,h.y,40,'#fb7185',170); SFX.kill(); shake=Math.min(7,shake+4);
+      addParticles(h.x,h.y,40,'#fb7185',170); SFX.kill(h.x,h.y); shake=Math.min(7,shake+4);
       // an organ dying in the dark names nothing — the fog keeps its secret
       if(isKnown(h.x,h.y)) logEvent(`<b>♥ ${h.primary?'PRIMARY ':''}HEART SLAIN!</b> ${hearts.length} remaining. (+${25+pb} purge)`, 'good');
       else logEvent('<b>Something vast dies in the dark.</b> (+purge)', 'good');
@@ -1450,7 +1543,7 @@ function damageEntitiesAt(wx,wy,dmg,radius,opts){
       purgeTotal+=60;
       coins+=120; addNum(c.x,c.y-20,'CORE DESTROYED +120g','#e9d5ff');
       addParticles(c.x,c.y,70,'#881337',220); addParticles(c.x,c.y,40,'#e9d5ff',180);
-      SFX.boom(); shake=Math.min(9,shake+5);
+      SFX.boom(c.x,c.y); shake=Math.min(9,shake+5);
       if(isKnown(c.x,c.y)){
         logEvent('<b>◉ BLOOM CORE DESTROYED.</b> The source is gone — but every voxel, thread and cluster it made REMAINS. Reclaim the ground.', 'good');
         toast('◉ CORE DOWN — RECLAIM THE GROUND', 'good');
@@ -2028,7 +2121,7 @@ function updatePurge(ddt){
 // physical spacecraft: a disposable 4-craft fleet you fly at the map to carve
 // a path through Bloom territory. 1 HP each — the cloud eats them. Survivors
 // strafe the target, then they're gone. Expensive, fragile, manual.
-const STRIKE_COST=260, STRIKE_CD=75, STRIKE_SHIPS=4, STRIKE_DMG=25, STRIKE_LIFE=14, STRIKE_SPEED=340;
+const STRIKE_COST=500, STRIKE_CD=75, STRIKE_SHIPS=4, STRIKE_DMG=40, STRIKE_LIFE=18, STRIKE_SPEED=340;
 let strikers=[]; // {x,y,tx,ty,speed,hp,fireCd,life,seed,orbit}
 let strikeCd=0, strikeArming=false;
 function strikeUnlocked(){
@@ -2106,7 +2199,7 @@ function updateStrikers(ddt){
         const spd=750;
         projectiles.push({x:s.x, y:s.y,
           vx:(dx/dist)*spd, vy:(dy/dist)*spd,
-          r:3.5, dmg:18, tower:null, life:1.4, trail:[],
+          r:3.5, dmg:28, tower:null, life:1.4, trail:[],
           slow:0, slowDur:0, splash:0, chain:0, color:'#7dd3fc',
           pierce:3, hitSet:new Set(), striker:true});
         addParticles(s.x,s.y,2,'#7dd3fc',40);
@@ -2134,7 +2227,7 @@ function updateStrikers(ddt){
         if(state!==STATE.PLAYING) return;
         damageTendrilsAt(s.x,s.y,STRIKE_DMG,42);
         addParticles(s.x,s.y,4,'#7dd3fc',70);
-        if(Math.random()<0.3) SFX.shoot();
+        if(Math.random()<0.3) SFX.shoot(s.x,s.y);
       }
     }
   }
@@ -3532,6 +3625,7 @@ addEventListener('keydown', e=>{
   }
   if(k==='p' && state===STATE.PLAYING) setState(STATE.PAUSED);
   if(k==='b' && (state===STATE.PLAYING||state===STATE.PAUSED)) toggleBar();
+  if(k==='m'){ ensureAudio(); setMuted(!muted); }
   if(['1','2','3'].includes(k) && state===STATE.WARP){
     const c=warpChoices[parseInt(k)-1];
     if(c){ pendingSys=c; doWarp(true); setState(STATE.PLAYING); ensureAudio(); updateBuildBar(); }
@@ -3809,7 +3903,7 @@ function update(dt){
         const gain=em.yield+droneYieldBonus()+((d.targetAsteroid&&d.targetAsteroid.cstate==='infected')?2:0);
         coins+=gain;
         if(destOut){ destOut.relayed+=gain; addNum(destX,destY-14,'+'+gain+'g → relay', '#7ce67c'); }
-        addParticles(destX,destY,6,'#ffd166'); addNum(destX,destY-12,'+'+gain+'g', '#ffd166'); SFX.coin();
+        addParticles(destX,destY,6,'#ffd166'); addNum(destX,destY-12,'+'+gain+'g', '#ffd166'); SFX.coin(destX,destY);
         if(em.purge){ purgeTotal+=em.purge; addNum(destX,destY-24,'+'+em.purge+' purge','#e9d5ff'); checkMilestones(); }
       } else {
         d.x += (dx/dlen)*d.speed*logisticsSpeedMult()*1.15*slowF*ddt;
@@ -3908,6 +4002,7 @@ function update(dt){
   if(state!==STATE.PLAYING) return;
   updateOutposts(ddt);
   if(state!==STATE.PLAYING) return;
+  updateAmbient(ddt); // the mix breathes with the threat — late game sounds late
   enemies.length=0; waveSpawning=false;
   // drift motes (pre-defense spores on the wind) + first-sighting checks
   if(sightingFlash>0) sightingFlash-=ddt;
@@ -4080,7 +4175,7 @@ function update(dt){
         const fireAng=Math.atan2(best.y - t.y, best.x - t.x);
         t.angle = fireAng;
         t.cd= 1/st.fireRate;
-        SFX.shoot();
+        SFX.shoot(t.x,t.y);
         const spd = t.projSpeed || 520;
         const pierce = st.pierce || 0;
         const burst = st.burst || 1;
@@ -4105,7 +4200,7 @@ function update(dt){
         const isPower = t.branch==='power';
         addParticles(t.x+Math.cos(fireAng)*14, t.y+Math.sin(fireAng)*14, count>1? (isPower?6:4) : (isPower?4:2), t.color, isPower?70:40);
         if(isPower){ shake=Math.min(shake+0.8, 4); }
-        if(pierce) SFX.pierce();
+        if(pierce) SFX.pierce(t.x,t.y);
       }
     }
   }
@@ -4140,7 +4235,7 @@ function update(dt){
       damageEntitiesAt(p.x,p.y,dmg,radius,{color:p.color});
       if(state!==STATE.PLAYING) return; // heart slain may have freed the galaxy
       damageTendrilsAt(p.x,p.y,dmg,radius); // tips stall when shot, sever when broken
-      SFX.hit();
+      SFX.hit(p.x,p.y);
       addNum(p.x,p.y-10,dmg,p.splash?'#fb923c':p.slow?'#7dd3fc':p.chain?'#a78bfa':'#fff');
       if(p.splash){
         addParticles(p.x,p.y,10,'#fb923c',90);
@@ -5789,6 +5884,9 @@ document.getElementById('speedBtn').onclick=()=>{
   speedMult = speedMult===1?1.8: speedMult===1.8?2.6:1;
   document.getElementById('speedBtn').textContent='\u00D7'+speedMult;
 };
+const muteBtnEl=document.getElementById('muteBtn');
+if(muteBtnEl) muteBtnEl.onclick=()=>{ ensureAudio(); setMuted(!muted); };
+setMuted(muted); // apply persisted state to the fresh button
 function dismissTut(){
   const tut=document.getElementById('tutorialHint');
   const bb=document.getElementById('buildBar');
